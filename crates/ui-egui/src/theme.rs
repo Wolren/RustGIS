@@ -1,5 +1,7 @@
-//! Design tokens (light and dark), interface fonts and the egui style.
+//! Design tokens (light and dark), interface metrics, the theme file format and the egui style.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, Visuals};
@@ -10,8 +12,52 @@ pub const BRAND_DARK: Color32 = Color32::from_rgb(0x96, 0x3A, 0x22);
 /// Contextual tab group colour (Feature Layer, Labeling, Data).
 pub const CONTEXT: Color32 = Color32::from_rgb(0x0E, 0x93, 0x84);
 
+/// The theme file format this build reads.
+pub const SCHEMA: u32 = 1;
+
+/// The most a theme file may be: a few hundred colours, not a disk to read whole.
+pub const MAX_THEME_BYTES: u64 = 64 * 1024;
+
+/// The longest theme name the menu shows: the ribbon has room for one line of it.
+const MAX_NAME: usize = 48;
+
+/// Every colour a theme file must set. A theme that omits one is refused, and the error names it.
+pub const TOKENS: [&str; 31] = [
+    "header",
+    "ribbon",
+    "tab_strip",
+    "canvas",
+    "pane",
+    "pane_header",
+    "border",
+    "border_strong",
+    "text",
+    "text_dim",
+    "text_disabled",
+    "icon",
+    "hover",
+    "pressed",
+    "checked",
+    "accent",
+    "accent_text",
+    "on_accent",
+    "input",
+    "input_border",
+    "group_label",
+    "status_bar",
+    "selection",
+    "menu",
+    "shadow",
+    "green",
+    "red",
+    "amber",
+    "context",
+    "context_tint",
+    "control",
+];
+
 /// Every colour the interface uses; widgets never hard-code colours.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tokens {
     pub dark: bool,
     pub header: Color32,
@@ -44,6 +90,8 @@ pub struct Tokens {
     pub amber: Color32,
     pub context: Color32,
     pub context_tint: Color32,
+    /// Slider rails and checkbox wells, which must stay visible on white.
+    pub control: Color32,
 }
 
 impl Tokens {
@@ -80,6 +128,7 @@ impl Tokens {
             amber: Color32::from_rgb(0xE5, 0x9E, 0x1A),
             context: CONTEXT,
             context_tint: Color32::from_rgb(0xE3, 0xF5, 0xF2),
+            control: Color32::from_rgb(0xDD, 0xE3, 0xEA),
         }
     }
 
@@ -116,11 +165,349 @@ impl Tokens {
             amber: Color32::from_rgb(0xF2, 0xB8, 0x48),
             context: Color32::from_rgb(0x2C, 0xC2, 0xAE),
             context_tint: Color32::from_rgb(0x1B, 0x33, 0x31),
+            control: Color32::from_rgb(0x3A, 0x42, 0x4D),
         }
     }
 
+    /// The theme in force, which the app puts on the context when it applies one.
     pub fn get(ctx: &egui::Context) -> Tokens {
-        if ctx.global_style().visuals.dark_mode { Tokens::dark() } else { Tokens::light() }
+        ctx.data(|d| d.get_temp::<Tokens>(tokens_id()))
+            .unwrap_or_else(|| if ctx.global_style().visuals.dark_mode { Tokens::dark() } else { Tokens::light() })
+    }
+}
+
+/// Where the applied colours are kept, so every widget reads the theme that is in force.
+fn tokens_id() -> egui::Id {
+    egui::Id::unique("rustgis.theme.tokens")
+}
+
+/// Spacing, corner radius and text sizes a theme sets, in points.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Metrics {
+    pub item_spacing: [f32; 2],
+    pub button_padding: [f32; 2],
+    pub row_height: f32,
+    pub corner_radius: u8,
+    pub body: f32,
+    pub button_text: f32,
+    pub small: f32,
+    pub heading: f32,
+    pub mono: f32,
+}
+
+impl Metrics {
+    pub fn standard() -> Self {
+        Metrics {
+            item_spacing: [6.0, 5.0],
+            button_padding: [8.0, 3.0],
+            row_height: 22.0,
+            corner_radius: 5,
+            body: 12.5,
+            button_text: 12.5,
+            small: 10.5,
+            heading: 17.0,
+            mono: 12.0,
+        }
+    }
+
+    /// These metrics within the ranges the interface can draw: a theme file is input from outside
+    /// the app, so an out-of-range number is held to the nearest end, a non-number takes the standard.
+    pub fn clamped(self) -> Self {
+        let fit = |v: f32, lo: f32, hi: f32, otherwise: f32| if v.is_finite() { v.clamp(lo, hi) } else { otherwise };
+        let std = Metrics::standard();
+        Metrics {
+            item_spacing: [
+                fit(self.item_spacing[0], 0.0, 40.0, std.item_spacing[0]),
+                fit(self.item_spacing[1], 0.0, 40.0, std.item_spacing[1]),
+            ],
+            button_padding: [
+                fit(self.button_padding[0], 0.0, 40.0, std.button_padding[0]),
+                fit(self.button_padding[1], 0.0, 40.0, std.button_padding[1]),
+            ],
+            row_height: fit(self.row_height, 8.0, 80.0, std.row_height),
+            corner_radius: self.corner_radius.min(32),
+            body: fit(self.body, 6.0, 40.0, std.body),
+            button_text: fit(self.button_text, 6.0, 40.0, std.button_text),
+            small: fit(self.small, 5.0, 32.0, std.small),
+            heading: fit(self.heading, 8.0, 60.0, std.heading),
+            mono: fit(self.mono, 5.0, 40.0, std.mono),
+        }
+    }
+}
+
+/// The interface scale a command accepts, held between 75 and 200 percent.
+pub fn clamp_scale(scale: f32) -> f32 {
+    if scale.is_finite() { scale.clamp(0.75, 2.0) } else { 1.0 }
+}
+
+/// A theme: named colours plus metrics, from a built-in file or a user theme file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Theme {
+    pub name: String,
+    pub dark: bool,
+    pub tokens: Tokens,
+    pub metrics: Metrics,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct Raw {
+    schema: u32,
+    name: String,
+    /// A theme that ships, whose colours and sizes this file starts from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extends: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dark: Option<bool>,
+    #[serde(default)]
+    colours: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metrics: Option<Metrics>,
+}
+
+impl Theme {
+    /// The themes that ship with the app, from `themes/*.json` beside this crate. A file that does
+    /// not load falls back to the code tables; `the_built_in_files_match_the_code_tables` catches it.
+    pub fn builtin() -> Vec<Theme> {
+        [("Light", include_str!("../themes/light.json"), Tokens::light()), ("Dark", include_str!("../themes/dark.json"), Tokens::dark())]
+            .into_iter()
+            .map(|(name, text, fallback)| {
+                Theme::parse(name, text).unwrap_or(Theme {
+                    name: name.to_string(),
+                    dark: fallback.dark,
+                    tokens: fallback,
+                    metrics: Metrics::standard(),
+                })
+            })
+            .collect()
+    }
+
+    /// Reads a theme file. Errors name the keys at fault, so a theme author can fix them.
+    pub fn parse(fallback_name: &str, text: &str) -> Result<Theme, String> {
+        // Notepad saves UTF-8 with a byte-order mark, which serde refuses at the first byte.
+        let text = text.trim_start_matches('\u{feff}');
+        let raw: Raw = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let name = clean_name(if raw.name.trim().is_empty() { fallback_name } else { raw.name.trim() });
+        if raw.schema != SCHEMA {
+            return Err(format!("{name}: theme schema {} is not {SCHEMA}", raw.schema));
+        }
+        // `extends` names a theme that ships: the file then sets only what it changes.
+        let base = match raw.extends.as_deref() {
+            None => None,
+            Some(wanted) => match Theme::builtin().into_iter().find(|t| t.name == wanted) {
+                Some(found) => Some(found),
+                None => return Err(format!("{name}: extends {wanted}, which is not a built-in theme")),
+            },
+        };
+        let unknown: Vec<&str> = raw.colours.keys().map(String::as_str).filter(|k| !TOKENS.contains(k)).collect();
+        if !unknown.is_empty() {
+            return Err(format!("{name}: unknown {}", unknown.join(", ")));
+        }
+        // Without a base, every colour and size must be here.
+        let missing: Vec<&str> = match &base {
+            Some(_) => Vec::new(),
+            None => TOKENS.iter().copied().filter(|t| !raw.colours.contains_key(*t)).collect(),
+        };
+        if !missing.is_empty() {
+            return Err(format!("{name}: missing {}", missing.join(", ")));
+        }
+        let fallback = base.unwrap_or_else(|| Theme {
+            name: name.clone(),
+            dark: raw.dark.unwrap_or(false),
+            tokens: if raw.dark.unwrap_or(false) { Tokens::dark() } else { Tokens::light() },
+            metrics: Metrics::standard(),
+        });
+        let mut tokens = fallback.tokens;
+        for (key, value) in &raw.colours {
+            let colour = parse_colour(value).map_err(|e| format!("{name}: {key} {e}"))?;
+            if let Some(slot) = slot(&mut tokens, key) {
+                *slot = colour;
+            }
+        }
+        let dark = raw.dark.unwrap_or(fallback.dark);
+        let metrics = raw.metrics.unwrap_or(fallback.metrics).clamped();
+        Ok(Theme { name, dark, tokens, metrics })
+    }
+
+    /// The theme as a file an author can edit and drop in the themes folder.
+    pub fn to_json(&self) -> Result<String, String> {
+        let colours: BTreeMap<String, String> = TOKENS.iter().map(|name| ((*name).to_string(), hex(colour(self, name)))).collect();
+        let raw =
+            Raw { schema: SCHEMA, name: self.name.clone(), extends: None, dark: Some(self.dark), colours, metrics: Some(self.metrics) };
+        serde_json::to_string_pretty(&raw).map_err(|e| format!("{}: {e}", self.name))
+    }
+
+    /// The built-in themes plus every readable theme in the user folder, and the errors for those
+    /// that do not load.
+    pub fn available() -> (Vec<Theme>, Vec<String>) {
+        Self::available_in(Self::user_dir().as_deref())
+    }
+
+    /// The same, from a named folder; a missing folder is not an error.
+    pub fn available_in(dir: Option<&std::path::Path>) -> (Vec<Theme>, Vec<String>) {
+        let mut themes = Theme::builtin();
+        let mut errors = Vec::new();
+        let Some(dir) = dir else {
+            return (themes, errors);
+        };
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return (themes, errors);
+        };
+        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+        files.sort();
+        for path in files {
+            let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            // A huge file is not a theme, and reading it whole would cost the app the disk.
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() > MAX_THEME_BYTES => {
+                    errors.push(format!("{}: larger than {MAX_THEME_BYTES} bytes", path.display()));
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    errors.push(format!("{}: {e}", path.display()));
+                    continue;
+                }
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match Theme::parse(&stem, &text) {
+                    // A user file named as a built-in replaces it, so a name picks one theme.
+                    Ok(theme) => match themes.iter_mut().find(|t| t.name == theme.name) {
+                        Some(replaced) => *replaced = theme,
+                        None => themes.push(theme),
+                    },
+                    Err(e) => errors.push(format!("{}: {e}", path.display())),
+                },
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+        (themes, errors)
+    }
+
+    /// What the folder holds now. A different value means a file was added, removed or saved, so
+    /// the app can pick the change up without being told.
+    pub fn folder_signature(dir: Option<&std::path::Path>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(dir) = dir else { return 0 };
+        let Ok(read) = std::fs::read_dir(dir) else { return 0 };
+        let mut stamps: Vec<(String, u64, u128)> = read
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|e| e == "json"))
+            .filter_map(|e| {
+                let path = e.path();
+                let meta = e.metadata().ok()?;
+                let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+                Some((path.file_name()?.to_string_lossy().into_owned(), meta.len(), saved))
+            })
+            .collect();
+        stamps.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        stamps.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// `<config>/themes`, where a user theme is read from.
+    pub fn user_dir() -> Option<PathBuf> {
+        rustgis_engine::data::dirs::config_dir().map(|d| d.join("themes"))
+    }
+
+    /// Writes the theme into the user folder, under its own name.
+    pub fn save_user(&self) -> Result<PathBuf, String> {
+        let dir = Self::user_dir().ok_or("no settings folder")?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let stem: String = self.name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+        let path = dir.join(format!("{}.json", stem.trim_matches('-')));
+        let text = self.to_json()?;
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(path)
+    }
+}
+
+/// The mutable slot for one token name, so the file writer, the reader and the tests share a list.
+fn slot<'a>(t: &'a mut Tokens, name: &str) -> Option<&'a mut Color32> {
+    Some(match name {
+        "header" => &mut t.header,
+        "ribbon" => &mut t.ribbon,
+        "tab_strip" => &mut t.tab_strip,
+        "canvas" => &mut t.canvas,
+        "pane" => &mut t.pane,
+        "pane_header" => &mut t.pane_header,
+        "border" => &mut t.border,
+        "border_strong" => &mut t.border_strong,
+        "text" => &mut t.text,
+        "text_dim" => &mut t.text_dim,
+        "text_disabled" => &mut t.text_disabled,
+        "icon" => &mut t.icon,
+        "hover" => &mut t.hover,
+        "pressed" => &mut t.pressed,
+        "checked" => &mut t.checked,
+        "accent" => &mut t.accent,
+        "accent_text" => &mut t.accent_text,
+        "on_accent" => &mut t.on_accent,
+        "input" => &mut t.input,
+        "input_border" => &mut t.input_border,
+        "group_label" => &mut t.group_label,
+        "status_bar" => &mut t.status_bar,
+        "selection" => &mut t.selection,
+        "menu" => &mut t.menu,
+        "shadow" => &mut t.shadow,
+        "green" => &mut t.green,
+        "red" => &mut t.red,
+        "amber" => &mut t.amber,
+        "context" => &mut t.context,
+        "context_tint" => &mut t.context_tint,
+        "control" => &mut t.control,
+        _ => return None,
+    })
+}
+
+/// One token of a theme by name.
+pub fn colour(theme: &Theme, name: &str) -> Color32 {
+    let mut tokens = theme.tokens;
+    slot(&mut tokens, name).map_or(Color32::TRANSPARENT, |c| *c)
+}
+
+/// `#RRGGBB`, or `#RRGGBBAA` where the alpha matters, as in a shadow.
+fn hex(c: Color32) -> String {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 { format!("#{r:02X}{g:02X}{b:02X}") } else { format!("#{r:02X}{g:02X}{b:02X}{a:02X}") }
+}
+
+/// WCAG contrast ratio between two colours, 1.0 to 21.0.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let lum = |c: Color32| {
+        let [r, g, b, _] = c.to_srgba_unmultiplied();
+        let channel = |v: u8| {
+            let v = f32::from(v) / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    };
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// A name as the menu shows it: one line, no control characters, and at most [`MAX_NAME`] long.
+fn clean_name(name: &str) -> String {
+    let kept: String = name.trim().chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
+    let kept = kept.trim();
+    if kept.is_empty() { "Theme".to_string() } else { kept.to_string() }
+}
+
+/// A colour from a theme file. Text that is not hexadecimal is refused rather than cut at a byte
+/// boundary, which a non-ASCII character would be.
+fn parse_colour(text: &str) -> Result<Color32, String> {
+    let digits = text.strip_prefix('#').ok_or_else(|| format!("is not a #RRGGBB colour: {text}"))?;
+    let bad = || format!("is not a #RRGGBB or #RRGGBBAA colour: {text}");
+    if !digits.is_ascii() {
+        return Err(bad());
+    }
+    let pair = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| bad());
+    match digits.len() {
+        6 => Ok(Color32::from_rgb(pair(0)?, pair(2)?, pair(4)?)),
+        8 => Ok(Color32::from_rgba_unmultiplied(pair(0)?, pair(2)?, pair(4)?, pair(6)?)),
+        _ => Err(bad()),
     }
 }
 
@@ -184,8 +571,10 @@ pub fn install_fonts(
     ctx.set_fonts(fonts);
 }
 
-pub fn apply(ctx: &egui::Context, t: &Tokens) {
+/// Puts a theme on the context: colours, widget states, spacing and text sizes.
+pub fn apply(ctx: &egui::Context, t: &Tokens, m: &Metrics) {
     let mut v = if t.dark { Visuals::dark() } else { Visuals::light() };
+    let corner = CornerRadius::same(m.corner_radius);
     v.panel_fill = t.pane;
     v.window_fill = t.menu;
     v.extreme_bg_color = t.input;
@@ -198,38 +587,38 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     v.hyperlink_color = t.accent_text;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.text);
-    // Slider rails and checkbox wells use this fill; keep it visible on white.
-    v.widgets.inactive.bg_fill = if t.dark { Color32::from_rgb(0x3A, 0x42, 0x4D) } else { Color32::from_rgb(0xDD, 0xE3, 0xEA) };
+    v.widgets.inactive.bg_fill = t.control;
     v.slider_trailing_fill = true;
     v.widgets.inactive.weak_bg_fill = t.input;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, t.input_border);
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, t.text);
-    v.widgets.inactive.corner_radius = CornerRadius::same(5);
+    v.widgets.inactive.corner_radius = corner;
     v.widgets.hovered.bg_fill = t.hover;
     v.widgets.hovered.weak_bg_fill = t.hover;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, t.border_strong);
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, t.text);
-    v.widgets.hovered.corner_radius = CornerRadius::same(5);
+    v.widgets.hovered.corner_radius = corner;
     v.widgets.active.bg_fill = t.pressed;
     v.widgets.active.weak_bg_fill = t.pressed;
     v.widgets.active.fg_stroke = Stroke::new(1.0, t.text);
-    v.widgets.active.corner_radius = CornerRadius::same(5);
+    v.widgets.active.corner_radius = corner;
     v.widgets.open.bg_fill = t.pressed;
     v.widgets.open.weak_bg_fill = t.pressed;
     v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: t.shadow };
     v.window_shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: t.shadow };
+    ctx.data_mut(|d| d.insert_temp(tokens_id(), *t));
     // Pin egui's theme to ours: the app decides when to follow the system (`dark_follows_system`).
     ctx.set_theme(if t.dark { egui::Theme::Dark } else { egui::Theme::Light });
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(6.0, 5.0);
-        s.spacing.button_padding = egui::vec2(8.0, 3.0);
-        s.spacing.interact_size.y = 22.0;
-        s.text_styles.insert(egui::TextStyle::Body, regular(12.5));
-        s.text_styles.insert(egui::TextStyle::Button, regular(12.5));
-        s.text_styles.insert(egui::TextStyle::Small, regular(10.5));
-        s.text_styles.insert(egui::TextStyle::Heading, semibold(17.0));
-        s.text_styles.insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
+        s.spacing.item_spacing = egui::vec2(m.item_spacing[0], m.item_spacing[1]);
+        s.spacing.button_padding = egui::vec2(m.button_padding[0], m.button_padding[1]);
+        s.spacing.interact_size.y = m.row_height;
+        s.text_styles.insert(egui::TextStyle::Body, regular(m.body));
+        s.text_styles.insert(egui::TextStyle::Button, regular(m.button_text));
+        s.text_styles.insert(egui::TextStyle::Small, regular(m.small));
+        s.text_styles.insert(egui::TextStyle::Heading, semibold(m.heading));
+        s.text_styles.insert(egui::TextStyle::Monospace, FontId::monospace(m.mono));
     });
 }
 
@@ -241,4 +630,253 @@ pub fn c32(c: rustgis_engine::map::Rgba) -> Color32 {
 pub fn rgba(c: Color32) -> rustgis_engine::map::Rgba {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     rustgis_engine::map::Rgba::new(r, g, b, a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn light() -> Theme {
+        Theme::builtin().into_iter().find(|t| !t.dark).expect("a light theme ships")
+    }
+
+    #[test]
+    fn the_built_in_files_match_the_code_tables() {
+        let builtin = Theme::builtin();
+        for (name, want) in [("Light", Tokens::light()), ("Dark", Tokens::dark())] {
+            let theme = builtin.iter().find(|t| t.name == name).expect("the theme ships");
+            assert_eq!(theme.dark, want.dark, "{name} brightness");
+            for token in TOKENS {
+                let mut copy = want;
+                assert_eq!(colour(theme, token), *slot(&mut copy, token).expect("every token has a slot"), "{name} token {token}");
+            }
+            assert_eq!(theme.metrics, Metrics::standard(), "{name} metrics");
+        }
+    }
+
+    #[test]
+    fn every_built_in_theme_round_trips_and_sets_every_token() {
+        for theme in Theme::builtin() {
+            assert_eq!(Theme::parse(&theme.name, &theme.to_json().expect("json")).ok().as_ref(), Some(&theme));
+            for token in TOKENS {
+                assert!(colour(&theme, token).a() > 0, "{} leaves {token} invisible", theme.name);
+            }
+        }
+    }
+
+    #[test]
+    fn every_built_in_theme_reads_its_text_on_its_surfaces() {
+        for theme in Theme::builtin() {
+            let ratio = contrast(theme.tokens.text, theme.tokens.pane);
+            assert!(ratio >= 7.0, "{}: text on a pane is {ratio:.1}:1, below the AAA floor of 7:1", theme.name);
+            let ratio = contrast(theme.tokens.text, theme.tokens.ribbon);
+            assert!(ratio >= 7.0, "{}: text on the ribbon is {ratio:.1}:1", theme.name);
+        }
+    }
+
+    #[test]
+    fn a_file_saved_with_a_byte_order_mark_loads() {
+        let text = format!("\u{feff}{}", light().to_json().expect("json"));
+        assert_eq!(Theme::parse("Light", &text).expect("it loads").name, "Light");
+    }
+
+    #[test]
+    fn a_file_that_extends_a_built_in_sets_only_what_it_changes() {
+        let text = r##"{"schema": 1, "name": "Mine", "extends": "Dark", "colours": {"accent": "#F2A65A"}}"##;
+        let theme = Theme::parse("mine", text).expect("it parses");
+        assert_eq!(theme.name, "Mine");
+        assert!(theme.dark, "it takes the brightness of the theme it extends");
+        assert_eq!(theme.tokens.accent, Color32::from_rgb(0xF2, 0xA6, 0x5A));
+        assert_eq!(theme.tokens.pane, Tokens::dark().pane, "the rest comes from Dark");
+        assert_eq!(theme.metrics, Metrics::standard(), "sizes too");
+    }
+
+    #[test]
+    fn extends_names_a_theme_that_ships() {
+        let text = r#"{"schema": 1, "name": "Mine", "extends": "Sunset"}"#;
+        let err = Theme::parse("mine", text).expect_err("nothing called Sunset ships");
+        assert!(err.contains("extends Sunset"), "{err}");
+    }
+
+    #[test]
+    fn the_folder_signature_follows_a_saved_file() {
+        let dir = theme_folder("rustgis-theme-signature-test", &[("mine.json", "{}")]);
+        let before = Theme::folder_signature(Some(&dir));
+        std::fs::write(dir.join("mine.json"), "{\"schema\": 1}").expect("the file");
+        assert_ne!(Theme::folder_signature(Some(&dir)), before, "a saved file is noticed");
+        assert_eq!(Theme::folder_signature(None), 0, "no folder never changes");
+    }
+
+    #[test]
+    fn a_missing_token_is_named() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["colours"].as_object_mut().expect("colours").remove("accent");
+        let err = Theme::parse("Mine", &json.to_string()).expect_err("a missing token is refused");
+        assert!(err.contains("missing accent"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_token_is_named() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["colours"].as_object_mut().expect("colours").insert("acccent".into(), "#FF0000".into());
+        let err = Theme::parse("Mine", &json.to_string()).expect_err("an unknown token is refused");
+        assert!(err.contains("unknown acccent"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_colour_names_the_token() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["colours"]["accent"] = "blue".into();
+        let err = Theme::parse("Mine", &json.to_string()).expect_err("a bad colour is refused");
+        assert!(err.contains("accent is not a #RRGGBB"), "{err}");
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_by_number() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["schema"] = 9.into();
+        let err = Theme::parse("Mine", &json.to_string()).expect_err("another schema is refused");
+        assert!(err.contains("schema 9 is not 1"), "{err}");
+    }
+
+    #[test]
+    fn a_file_round_trips_with_its_alpha() {
+        let theme = light();
+        let back = Theme::parse("light", &theme.to_json().expect("json")).expect("its own file parses");
+        assert_eq!(back, theme);
+        assert_eq!(hex(theme.tokens.shadow), "#0000001C", "the shadow keeps its alpha");
+    }
+
+    #[test]
+    fn a_nameless_file_takes_its_file_name() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["name"] = "  ".into();
+        let theme = Theme::parse("sunset", &json.to_string()).expect("it parses");
+        assert_eq!(theme.name, "sunset");
+    }
+
+    #[test]
+    fn every_token_name_has_its_own_slot() {
+        let mut tokens = Tokens::light();
+        for (i, name) in TOKENS.iter().enumerate() {
+            *slot(&mut tokens, name).expect("a slot") = Color32::from_rgb(i as u8, 0, 0);
+        }
+        for (i, name) in TOKENS.iter().enumerate() {
+            let mut copy = tokens;
+            assert_eq!(slot(&mut copy, name).copied(), Some(Color32::from_rgb(i as u8, 0, 0)), "{name}");
+        }
+    }
+
+    /// A temporary folder of theme files, fresh on every call.
+    fn theme_folder(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the folder");
+        for (file, text) in files {
+            std::fs::write(dir.join(file), text).expect("the file");
+        }
+        dir
+    }
+
+    #[test]
+    fn a_theme_in_the_user_folder_is_offered() {
+        let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
+        let dir = theme_folder("rustgis-theme-folder-test", &[("mine.json", &mine)]);
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(found.iter().any(|t| t.name == "Mine"), "the folder theme is offered");
+        assert!(found.iter().any(|t| t.name == "Light"), "the built-in themes stay");
+    }
+
+    #[test]
+    fn a_broken_file_is_reported_and_the_others_load() {
+        let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
+        let dir = theme_folder("rustgis-theme-broken-test", &[("mine.json", &mine), ("half.json", "{\"schema\": 1}")]);
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("half.json"), "{errors:?}");
+        assert!(found.iter().any(|t| t.name == "Mine"), "the good file still loads");
+    }
+
+    #[test]
+    fn a_user_theme_replaces_the_built_in_of_the_same_name() {
+        // A colour reworked in the user's folder is offered once, under the built-in's name.
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["colours"]["accent"] = "#123456".into();
+        let dir = theme_folder("rustgis-theme-replace-test", &[("light.json", &json.to_string())]);
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(found.iter().filter(|t| t.name == "Light").count(), 1, "one Light is offered");
+        let light = found.iter().find(|t| t.name == "Light").expect("Light is offered");
+        assert_eq!(light.tokens.accent, Color32::from_rgb(0x12, 0x34, 0x56), "the user file wins");
+    }
+
+    #[test]
+    fn apply_puts_the_theme_on_the_context() {
+        let ctx = egui::Context::default();
+        let theme = light();
+        apply(&ctx, &theme.tokens, &theme.metrics);
+        let style = ctx.global_style();
+        assert_eq!(style.visuals.panel_fill, theme.tokens.pane);
+        assert_eq!(style.visuals.widgets.inactive.bg_fill, theme.tokens.control);
+        assert_eq!(style.spacing.item_spacing, egui::vec2(6.0, 5.0));
+        assert_eq!(style.spacing.interact_size.y, 22.0);
+        assert_eq!(style.text_styles[&egui::TextStyle::Body], regular(12.5));
+        assert_eq!(style.text_styles[&egui::TextStyle::Heading], semibold(17.0));
+        assert_eq!(Tokens::get(&ctx), theme.tokens, "widgets read the applied colours back");
+    }
+
+    #[test]
+    fn metrics_are_held_within_what_the_interface_draws() {
+        // A theme file is input from outside: sizes are held to ranges a window can draw.
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["metrics"]["body"] = serde_json::json!(1e9);
+        json["metrics"]["small"] = serde_json::json!(-5.0);
+        json["metrics"]["corner_radius"] = serde_json::json!(250);
+        json["metrics"]["item_spacing"] = serde_json::json!([1e9, -1e9]);
+        let theme = Theme::parse("Mine", &json.to_string()).expect("it parses");
+        assert_eq!(theme.metrics.body, 40.0, "a huge size is held to the largest drawn");
+        assert_eq!(theme.metrics.small, 5.0, "a negative size is held to the smallest drawn");
+        assert_eq!(theme.metrics.corner_radius, 32);
+        assert_eq!(theme.metrics.item_spacing, [40.0, 0.0]);
+        assert_eq!(theme.metrics.heading, 17.0, "what the file does not set stays standard");
+    }
+
+    #[test]
+    fn a_colour_that_is_not_hexadecimal_is_refused_without_panicking() {
+        // `#€€` is six bytes, so the length alone would let it through to a byte cut inside a
+        // character, which panics.
+        for bad in ["#€€", "#€€€", "#€€€€", "#12345", "#1234567", "123456", "#GGGGGG", "#12345€"] {
+            assert!(parse_colour(bad).is_err(), "{bad:?} is refused");
+        }
+        assert_eq!(parse_colour("#123456"), Ok(Color32::from_rgb(0x12, 0x34, 0x56)));
+    }
+
+    #[test]
+    fn a_name_is_one_short_line() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["name"] = serde_json::json!("Mine\nSecond line\twith a tab");
+        let theme = Theme::parse("Mine", &json.to_string()).expect("it parses");
+        assert_eq!(theme.name, "MineSecond linewith a tab", "a newline would break the button");
+
+        json["name"] = serde_json::json!("N".repeat(200));
+        let theme = Theme::parse("Mine", &json.to_string()).expect("it parses");
+        assert_eq!(theme.name.chars().count(), MAX_NAME, "a long name is cut to fit");
+
+        json["name"] = serde_json::json!("   ");
+        let theme = Theme::parse("file-name", &json.to_string()).expect("it parses");
+        assert_eq!(theme.name, "file-name", "a nameless file takes its own name");
+    }
+
+    #[test]
+    fn a_file_too_large_to_be_a_theme_is_reported_not_read() {
+        let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
+        let dir = theme_folder("rustgis-theme-large-test", &[("mine.json", &mine)]);
+        let huge = "x".repeat(MAX_THEME_BYTES as usize + 1);
+        std::fs::write(dir.join("huge.json"), huge).expect("the file");
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("huge.json"), "{errors:?}");
+        assert!(found.iter().any(|t| t.name == "Mine"), "the good file still loads");
+    }
 }

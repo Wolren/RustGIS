@@ -67,8 +67,8 @@ impl RibbonSplitShowcase {
             self.fonts_installed = true;
         }
         if self.applied_dark != Some(app.ui.dark) {
-            let tokens = if app.ui.dark { theme::Tokens::dark() } else { theme::Tokens::light() };
-            theme::apply(ui.ctx(), &tokens);
+            let chosen = app.current_theme();
+            theme::apply(ui.ctx(), &chosen.tokens, &chosen.metrics);
             self.applied_dark = Some(app.ui.dark);
         }
         i18n::set_current(app.chosen_lang());
