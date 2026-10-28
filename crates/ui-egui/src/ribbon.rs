@@ -3397,8 +3397,13 @@ fn plugin_tab(app: &mut RustGisApp, ui: &mut Ui, plugin: &str) {
     }
 }
 
-/// The Settings tab: ribbon customization, language, start-up and (on the desktop) autosave.
+/// The Settings tab: theme and scale, ribbon customization, language, start-up and (on the
+/// desktop) autosave.
 fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
+    group(ui, "Theme", |ui| {
+        theme_menu(app, ui);
+        scale_menu(app, ui);
+    });
     group(ui, "Customize", |ui| {
         let hidden = app.ui.hidden_tabs.clone();
         // RustGIS's tabs and plugins' tabs.
@@ -3449,6 +3454,87 @@ fn autosave_menu(app: &mut RustGisApp, ui: &mut Ui) {
         for m in crate::autosave::CHOICES {
             if ui.add(egui::Button::selectable(minutes == m, autosave_interval(m))).clicked() {
                 let _ = app.run("ui.autosave", json!({"minutes": m}));
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Settings › Theme: the built-in themes and every theme file that loads, plus the interface scale.
+fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
+    let current = if !app.ui.theme_name.is_empty() {
+        app.ui.theme_name.clone()
+    } else if app.ui.dark_follows_system {
+        tl!("Follow the System").to_string()
+    } else if app.ui.dark {
+        tl!("Dark").to_string()
+    } else {
+        tl!("Light").to_string()
+    };
+    let label = format!("{}\n{current}", tl!("Theme"));
+    let themes = app.themes.clone();
+    let errors = app.theme_errors.clone();
+    // The browser has no settings folder to read theme files from or write one to.
+    let folder = crate::theme::Theme::user_dir().is_some();
+    big_menu(
+        ui,
+        app,
+        "dark",
+        &label,
+        "The interface colours, spacing and text sizes: a built-in theme or a file from the themes folder.",
+        move |ui, app| {
+            let follows = app.ui.theme_name.is_empty() && app.ui.dark_follows_system;
+            if ui.add(egui::Button::selectable(follows, tl!("Follow the System"))).clicked() {
+                let _ = app.run("ui.themeFile", Value::Null);
+                ui.close();
+            }
+            for found in &themes {
+                let picked = app.ui.theme_name == found.name;
+                if ui.add(egui::Button::selectable(picked, found.name.as_str())).clicked() {
+                    theme_action(app, "ui.themeFile", json!({ "name": found.name }));
+                    ui.close();
+                }
+            }
+            if folder {
+                ui.separator();
+                if ui.add(egui::Button::selectable(false, tl!("Load a Theme from File…"))).clicked() {
+                    theme_action(app, "ui.themeLoad", Value::Null);
+                    ui.close();
+                }
+                // After a file is added or fixed by hand: the list is read at startup otherwise.
+                if ui.add(egui::Button::selectable(false, tl!("Reload Themes"))).clicked() {
+                    let _ = app.run("ui.themeReload", Value::Null);
+                    ui.close();
+                }
+            }
+            if !errors.is_empty() {
+                ui.separator();
+                let red = Tokens::get(ui.ctx()).red;
+                for error in &errors {
+                    ui.label(egui::RichText::new(error).color(red).small());
+                }
+            }
+        },
+    );
+}
+
+/// Runs a menu action, telling the user what went wrong rather than nothing happening.
+fn theme_action(app: &mut RustGisApp, id: &str, params: Value) {
+    if let Err(e) = app.run(id, params) {
+        app.session.notify(e, true);
+    }
+}
+
+/// Settings › Theme › Interface Scale: the whole interface, as egui's zoom factor.
+fn scale_menu(app: &mut RustGisApp, ui: &mut Ui) {
+    let current = format!("{}%", (app.ui.interface_scale * 100.0).round() as i32);
+    let label = format!("{}\n{current}", tl!("Interface Scale"));
+    big_menu(ui, app, "zoom_full", &label, "The size of the menu, the panes and the text drawn in them.", move |ui, app| {
+        for percent in [80, 90, 100, 110, 125, 150, 175, 200] {
+            let factor = percent as f32 / 100.0;
+            let picked = (app.ui.interface_scale - factor).abs() < 0.001;
+            if ui.add(egui::Button::selectable(picked, format!("{percent}%"))).clicked() {
+                let _ = app.run("ui.scale", json!({ "factor": factor }));
                 ui.close();
             }
         }
