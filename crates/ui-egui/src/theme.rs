@@ -181,6 +181,77 @@ fn tokens_id() -> egui::Id {
     egui::Id::unique("rustgis.theme.tokens")
 }
 
+/// A file's `metrics` block: every field optional, and an unknown name is reported by name.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct MetricsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item_spacing: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    button_padding: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    corner_radius: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    button_text: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    small: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heading: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mono: Option<f32>,
+}
+
+impl MetricsFile {
+    fn from(metrics: &Metrics) -> Self {
+        MetricsFile {
+            item_spacing: Some(metrics.item_spacing),
+            button_padding: Some(metrics.button_padding),
+            row_height: Some(metrics.row_height),
+            corner_radius: Some(metrics.corner_radius),
+            body: Some(metrics.body),
+            button_text: Some(metrics.button_text),
+            small: Some(metrics.small),
+            heading: Some(metrics.heading),
+            mono: Some(metrics.mono),
+        }
+    }
+
+    /// Applies the sizes the file sets; the rest keep what the theme it extends gave them.
+    fn apply_to(self, metrics: &mut Metrics) {
+        if let Some(v) = self.item_spacing {
+            metrics.item_spacing = v;
+        }
+        if let Some(v) = self.button_padding {
+            metrics.button_padding = v;
+        }
+        if let Some(v) = self.row_height {
+            metrics.row_height = v;
+        }
+        if let Some(v) = self.corner_radius {
+            metrics.corner_radius = v;
+        }
+        if let Some(v) = self.body {
+            metrics.body = v;
+        }
+        if let Some(v) = self.button_text {
+            metrics.button_text = v;
+        }
+        if let Some(v) = self.small {
+            metrics.small = v;
+        }
+        if let Some(v) = self.heading {
+            metrics.heading = v;
+        }
+        if let Some(v) = self.mono {
+            metrics.mono = v;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -260,7 +331,7 @@ struct Raw {
     #[serde(default)]
     colours: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    metrics: Option<Metrics>,
+    metrics: Option<MetricsFile>,
 }
 
 impl Theme {
@@ -288,6 +359,7 @@ impl Theme {
         if raw.schema != SCHEMA {
             return Err(format!("{name}: theme schema {} is not {SCHEMA}", raw.schema));
         }
+        let extends = raw.extends.is_some();
         let base = match raw.extends.as_deref() {
             None => None,
             Some(wanted) => match Theme::builtin().into_iter().find(|t| t.name == wanted) {
@@ -299,9 +371,9 @@ impl Theme {
         if !unknown.is_empty() {
             return Err(format!("{name}: unknown {}", unknown.join(", ")));
         }
-        let missing: Vec<&str> = match &base {
-            Some(_) => Vec::new(),
-            None => TOKENS.iter().copied().filter(|t| !raw.colours.contains_key(*t)).collect(),
+        let missing: Vec<&str> = match extends {
+            true => Vec::new(),
+            false => TOKENS.iter().copied().filter(|t| !raw.colours.contains_key(*t)).collect(),
         };
         if !missing.is_empty() {
             return Err(format!("{name}: missing {}", missing.join(", ")));
@@ -320,14 +392,24 @@ impl Theme {
             }
         }
         let dark = raw.dark.unwrap_or(fallback.dark);
-        let metrics = raw.metrics.unwrap_or(fallback.metrics).clamped();
+        let mut metrics = fallback.metrics;
+        if let Some(file) = raw.metrics {
+            file.apply_to(&mut metrics);
+        }
+        let metrics = metrics.clamped();
         Ok(Theme { name, dark, tokens, metrics })
     }
 
     pub fn to_json(&self) -> Result<String, String> {
         let colours: BTreeMap<String, String> = TOKENS.iter().map(|name| ((*name).to_string(), hex(colour(self, name)))).collect();
-        let raw =
-            Raw { schema: SCHEMA, name: self.name.clone(), extends: None, dark: Some(self.dark), colours, metrics: Some(self.metrics) };
+        let raw = Raw {
+            schema: SCHEMA,
+            name: self.name.clone(),
+            extends: None,
+            dark: Some(self.dark),
+            colours,
+            metrics: Some(MetricsFile::from(&self.metrics)),
+        };
         serde_json::to_string_pretty(&raw).map_err(|e| format!("{}: {e}", self.name))
     }
 
@@ -488,7 +570,7 @@ fn clean_name(name: &str) -> String {
 fn parse_colour(text: &str) -> Result<Color32, String> {
     let digits = text.strip_prefix('#').ok_or_else(|| format!("is not a #RRGGBB colour: {text}"))?;
     let bad = || format!("is not a #RRGGBB or #RRGGBBAA colour: {text}");
-    if !digits.is_ascii() {
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(bad());
     }
     let pair = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| bad());
@@ -692,6 +774,33 @@ mod tests {
         std::fs::write(dir.join("mine.json"), "{\"schema\": 1}").expect("the file");
         assert_ne!(Theme::folder_signature(Some(&dir)), before, "a saved file is noticed");
         assert_eq!(Theme::folder_signature(None), 0, "no folder never changes");
+    }
+
+    #[test]
+    fn a_file_sets_the_sizes_it_names_and_keeps_the_rest() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["extends"] = serde_json::json!("Light");
+        json["colours"] = serde_json::json!({});
+        json["metrics"] = serde_json::json!({ "body": 15.0 });
+        let theme = Theme::parse("Mine", &json.to_string()).expect("a file may set one size");
+        assert_eq!(theme.metrics.body, 15.0, "the size the file names");
+        assert_eq!(theme.metrics.row_height, light().metrics.row_height, "a size it leaves keeps Light's");
+    }
+
+    #[test]
+    fn a_size_that_does_not_exist_is_named() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["metrics"] = serde_json::json!({ "bdy": 14.0 });
+        let err = Theme::parse("Mine", &json.to_string()).expect_err("there is no size called bdy");
+        assert!(err.contains("bdy"), "{err}");
+    }
+
+    #[test]
+    fn a_colour_must_be_hex_digits() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["colours"]["accent"] = serde_json::json!("#+F+F+F");
+        let err = Theme::parse("Mine", &json.to_string()).expect_err("a plus sign is not a hex digit");
+        assert!(err.to_lowercase().contains("accent"), "{err}");
     }
 
     #[test]
