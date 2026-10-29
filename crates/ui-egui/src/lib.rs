@@ -903,7 +903,6 @@ pub struct RustGisApp {
     pub themes: Vec<theme::Theme>,
     /// The theme files that did not load, with the reason.
     pub theme_errors: Vec<String>,
-    /// What the themes folder held when it was last read, and when it was last looked at.
     themes_stamp: u64,
     themes_checked: f64,
     sent_title: String,
@@ -1178,7 +1177,7 @@ impl RustGisApp {
         let list = |s: Option<String>| -> Vec<String> {
             s.map(|v| v.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()).unwrap_or_default()
         };
-        // A saved theme is only found once the folder has been read.
+        // take_saved_look finds a saved theme only once the folder is read.
         self.load_themes();
         self.take_saved_look();
         self.ui.hidden_tabs = ribbon::current_hidden_tabs(list(self.services.load_pref.as_ref().and_then(|load| load("hidden_tabs"))));
@@ -1603,19 +1602,17 @@ impl RustGisApp {
         }
     }
 
-    /// Reads the built-in themes and the user's themes folder, keeping the files that failed.
     fn load_themes(&mut self) {
         let (themes, errors) = theme::Theme::available();
         self.themes = themes;
         self.theme_errors = errors;
         self.themes_stamp = theme::Theme::folder_signature(theme::Theme::user_dir().as_deref());
-        // The files may read differently: put the theme in force on again.
+        // Reset so a file that reads differently is applied again on the next frame.
         self.applied_theme = None;
     }
 
     /// Reads the folder again when a file in it was added, removed or saved, at most once a second.
     fn refresh_themes(&mut self, ctx: &egui::Context) {
-        // Only someone with a themes folder pays for this, and they are editing one.
         let Some(dir) = theme::Theme::user_dir().filter(|d| d.is_dir()) else { return };
         ctx.request_repaint_after(web_time::Duration::from_secs(1));
         let now = ctx.input(|i| i.time);
@@ -1643,8 +1640,7 @@ impl RustGisApp {
             })
     }
 
-    /// Takes the saved look from the preferences: the theme by name, else the brightness, and the
-    /// scale. A name that no longer loads leaves the look following the system.
+    /// A saved theme name wins; one that no longer loads follows the system.
     fn take_saved_look(&mut self) {
         let pref = |app: &Self, key: &str| -> Option<String> {
             app.services.load_pref.as_ref().and_then(|load| load(key)).filter(|v| !v.is_empty())
@@ -1664,7 +1660,6 @@ impl RustGisApp {
         self.ui.interface_scale = scale.map_or(1.0, theme::clamp_scale);
     }
 
-    /// Uses a theme from the list, and saves the choice.
     fn use_theme(&mut self, name: &str) -> Result<(), String> {
         let Some(picked) = self.themes.iter().find(|t| t.name == name).cloned() else {
             return Err(i18n::fmt("No theme is named {name}.", &[("name", name)]));
@@ -1679,7 +1674,6 @@ impl RustGisApp {
         Ok(())
     }
 
-    /// Reads a theme file from anywhere, keeps a copy in the themes folder and uses it.
     fn load_theme_file(&mut self, path: &std::path::Path) -> Result<(), String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
@@ -2317,7 +2311,6 @@ impl RustGisApp {
                     self.use_theme(&name)?;
                 }
             }
-            // Opens a theme file from anywhere, keeps it in the themes folder and uses it.
             "ui.themeLoad" => {
                 let Some(path) = dialogs::pick_open(&["json"], tl!("A theme file")) else { return Ok(Value::Null) };
                 self.load_theme_file(std::path::Path::new(&path))?;
@@ -2329,7 +2322,6 @@ impl RustGisApp {
                     save("ui_scale", &format!("{:.2}", self.ui.interface_scale));
                 }
             }
-            // Reads the themes folder again, after a file was added or fixed.
             "ui.themeReload" => self.load_themes(),
             "ui.measurementUnits" => {
                 let imperial = match p.get("units") {
@@ -4477,8 +4469,7 @@ mod look_tests {
     use super::RustGisApp;
     use crate::theme;
 
-    /// The app with a preferences store that answers these keys only, and a theme no folder ships,
-    /// so the test does not depend on the machine.
+    /// App whose preferences answer only these keys, with a theme no folder ships.
     fn app_with(prefs: &'static [(&'static str, &'static str)]) -> RustGisApp {
         let mut app = RustGisApp::with_sample();
         app.themes.push(theme::Theme {
@@ -4512,7 +4503,6 @@ mod look_tests {
         assert_eq!(app.ui.interface_scale, 1.0, "no scale saved is the normal one");
     }
 
-    /// What a theme choice writes to the preferences.
     fn saved_by(app: &mut RustGisApp) -> std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> {
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = log.clone();

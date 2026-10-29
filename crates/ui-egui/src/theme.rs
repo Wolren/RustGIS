@@ -12,13 +12,13 @@ pub const BRAND_DARK: Color32 = Color32::from_rgb(0x96, 0x3A, 0x22);
 /// Contextual tab group colour (Feature Layer, Labeling, Data).
 pub const CONTEXT: Color32 = Color32::from_rgb(0x0E, 0x93, 0x84);
 
-/// The theme file format this build reads.
+/// The only schema this build reads.
 pub const SCHEMA: u32 = 1;
 
-/// The most a theme file may be: a few hundred colours, not a disk to read whole.
+/// A larger file is refused before it is read.
 pub const MAX_THEME_BYTES: u64 = 64 * 1024;
 
-/// The longest theme name the menu shows: the ribbon has room for one line of it.
+/// One ribbon line fits; a longer name is cut to it.
 const MAX_NAME: usize = 48;
 
 /// Every colour a theme file must set. A theme that omits one is refused, and the error names it.
@@ -169,19 +169,18 @@ impl Tokens {
         }
     }
 
-    /// The theme in force, which the app puts on the context when it applies one.
+    /// Falls back to the brightness when no theme was applied to the context.
     pub fn get(ctx: &egui::Context) -> Tokens {
         ctx.data(|d| d.get_temp::<Tokens>(tokens_id()))
             .unwrap_or_else(|| if ctx.global_style().visuals.dark_mode { Tokens::dark() } else { Tokens::light() })
     }
 }
 
-/// Where the applied colours are kept, so every widget reads the theme that is in force.
+/// egui temp data key that lets every widget read the applied colours.
 fn tokens_id() -> egui::Id {
     egui::Id::unique("rustgis.theme.tokens")
 }
 
-/// Spacing, corner radius and text sizes a theme sets, in points.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
@@ -211,8 +210,7 @@ impl Metrics {
         }
     }
 
-    /// These metrics within the ranges the interface can draw: a theme file is input from outside
-    /// the app, so an out-of-range number is held to the nearest end, a non-number takes the standard.
+    /// Held to what a window draws; a value that is not a number takes the standard.
     pub fn clamped(self) -> Self {
         let fit = |v: f32, lo: f32, hi: f32, otherwise: f32| if v.is_finite() { v.clamp(lo, hi) } else { otherwise };
         let std = Metrics::standard();
@@ -241,7 +239,6 @@ pub fn clamp_scale(scale: f32) -> f32 {
     if scale.is_finite() { scale.clamp(0.75, 2.0) } else { 1.0 }
 }
 
-/// A theme: named colours plus metrics, from a built-in file or a user theme file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     pub name: String,
@@ -267,8 +264,7 @@ struct Raw {
 }
 
 impl Theme {
-    /// The themes that ship with the app, from `themes/*.json` beside this crate. A file that does
-    /// not load falls back to the code tables; `the_built_in_files_match_the_code_tables` catches it.
+    /// `themes/*.json` beside the crate; an unreadable file falls back to the code tables.
     pub fn builtin() -> Vec<Theme> {
         [("Light", include_str!("../themes/light.json"), Tokens::light()), ("Dark", include_str!("../themes/dark.json"), Tokens::dark())]
             .into_iter()
@@ -283,7 +279,7 @@ impl Theme {
             .collect()
     }
 
-    /// Reads a theme file. Errors name the keys at fault, so a theme author can fix them.
+    /// A refused file names the key at fault.
     pub fn parse(fallback_name: &str, text: &str) -> Result<Theme, String> {
         // Notepad saves UTF-8 with a byte-order mark, which serde refuses at the first byte.
         let text = text.trim_start_matches('\u{feff}');
@@ -292,7 +288,6 @@ impl Theme {
         if raw.schema != SCHEMA {
             return Err(format!("{name}: theme schema {} is not {SCHEMA}", raw.schema));
         }
-        // `extends` names a theme that ships: the file then sets only what it changes.
         let base = match raw.extends.as_deref() {
             None => None,
             Some(wanted) => match Theme::builtin().into_iter().find(|t| t.name == wanted) {
@@ -304,7 +299,6 @@ impl Theme {
         if !unknown.is_empty() {
             return Err(format!("{name}: unknown {}", unknown.join(", ")));
         }
-        // Without a base, every colour and size must be here.
         let missing: Vec<&str> = match &base {
             Some(_) => Vec::new(),
             None => TOKENS.iter().copied().filter(|t| !raw.colours.contains_key(*t)).collect(),
@@ -330,7 +324,6 @@ impl Theme {
         Ok(Theme { name, dark, tokens, metrics })
     }
 
-    /// The theme as a file an author can edit and drop in the themes folder.
     pub fn to_json(&self) -> Result<String, String> {
         let colours: BTreeMap<String, String> = TOKENS.iter().map(|name| ((*name).to_string(), hex(colour(self, name)))).collect();
         let raw =
@@ -338,8 +331,7 @@ impl Theme {
         serde_json::to_string_pretty(&raw).map_err(|e| format!("{}: {e}", self.name))
     }
 
-    /// The built-in themes plus every readable theme in the user folder, and the errors for those
-    /// that do not load.
+    /// Built-in themes plus the user folder's readable files; failures are returned apart.
     pub fn available() -> (Vec<Theme>, Vec<String>) {
         Self::available_in(Self::user_dir().as_deref())
     }
@@ -358,7 +350,6 @@ impl Theme {
         files.sort();
         for path in files {
             let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-            // A huge file is not a theme, and reading it whole would cost the app the disk.
             match std::fs::metadata(&path) {
                 Ok(meta) if meta.len() > MAX_THEME_BYTES => {
                     errors.push(format!("{}: larger than {MAX_THEME_BYTES} bytes", path.display()));
@@ -385,8 +376,7 @@ impl Theme {
         (themes, errors)
     }
 
-    /// What the folder holds now. A different value means a file was added, removed or saved, so
-    /// the app can pick the change up without being told.
+    /// Hash of each file's name, size and mtime; any change to the folder changes it.
     pub fn folder_signature(dir: Option<&std::path::Path>) -> u64 {
         use std::hash::{Hash, Hasher};
         let Some(dir) = dir else { return 0 };
@@ -412,7 +402,7 @@ impl Theme {
         rustgis_engine::data::dirs::config_dir().map(|d| d.join("themes"))
     }
 
-    /// Writes the theme into the user folder, under its own name.
+    /// The file name is the theme name with each non-alphanumeric character as `-`.
     pub fn save_user(&self) -> Result<PathBuf, String> {
         let dir = Self::user_dir().ok_or("no settings folder")?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -462,7 +452,6 @@ fn slot<'a>(t: &'a mut Tokens, name: &str) -> Option<&'a mut Color32> {
     })
 }
 
-/// One token of a theme by name.
 pub fn colour(theme: &Theme, name: &str) -> Color32 {
     let mut tokens = theme.tokens;
     slot(&mut tokens, name).map_or(Color32::TRANSPARENT, |c| *c)
@@ -495,8 +484,7 @@ fn clean_name(name: &str) -> String {
     if kept.is_empty() { "Theme".to_string() } else { kept.to_string() }
 }
 
-/// A colour from a theme file. Text that is not hexadecimal is refused rather than cut at a byte
-/// boundary, which a non-ASCII character would be.
+/// A non-ASCII colour is refused before the byte cut, which would land inside a character.
 fn parse_colour(text: &str) -> Result<Color32, String> {
     let digits = text.strip_prefix('#').ok_or_else(|| format!("is not a #RRGGBB colour: {text}"))?;
     let bad = || format!("is not a #RRGGBB or #RRGGBBAA colour: {text}");
@@ -571,7 +559,6 @@ pub fn install_fonts(
     ctx.set_fonts(fonts);
 }
 
-/// Puts a theme on the context: colours, widget states, spacing and text sizes.
 pub fn apply(ctx: &egui::Context, t: &Tokens, m: &Metrics) {
     let mut v = if t.dark { Visuals::dark() } else { Visuals::light() };
     let corner = CornerRadius::same(m.corner_radius);
@@ -693,9 +680,9 @@ mod tests {
 
     #[test]
     fn extends_names_a_theme_that_ships() {
-        let text = r#"{"schema": 1, "name": "Mine", "extends": "Sunset"}"#;
-        let err = Theme::parse("mine", text).expect_err("nothing called Sunset ships");
-        assert!(err.contains("extends Sunset"), "{err}");
+        let text = r#"{"schema": 1, "name": "Mine", "extends": "Gone"}"#;
+        let err = Theme::parse("mine", text).expect_err("no theme called Gone ships");
+        assert!(err.contains("extends Gone"), "{err}");
     }
 
     #[test]
@@ -751,8 +738,8 @@ mod tests {
     fn a_nameless_file_takes_its_file_name() {
         let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
         json["name"] = "  ".into();
-        let theme = Theme::parse("sunset", &json.to_string()).expect("it parses");
-        assert_eq!(theme.name, "sunset");
+        let theme = Theme::parse("my-theme", &json.to_string()).expect("it parses");
+        assert_eq!(theme.name, "my-theme");
     }
 
     #[test]
@@ -767,7 +754,6 @@ mod tests {
         }
     }
 
-    /// A temporary folder of theme files, fresh on every call.
     fn theme_folder(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&dir);
@@ -800,7 +786,6 @@ mod tests {
 
     #[test]
     fn a_user_theme_replaces_the_built_in_of_the_same_name() {
-        // A colour reworked in the user's folder is offered once, under the built-in's name.
         let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
         json["colours"]["accent"] = "#123456".into();
         let dir = theme_folder("rustgis-theme-replace-test", &[("light.json", &json.to_string())]);
@@ -828,7 +813,6 @@ mod tests {
 
     #[test]
     fn metrics_are_held_within_what_the_interface_draws() {
-        // A theme file is input from outside: sizes are held to ranges a window can draw.
         let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
         json["metrics"]["body"] = serde_json::json!(1e9);
         json["metrics"]["small"] = serde_json::json!(-5.0);
@@ -844,8 +828,7 @@ mod tests {
 
     #[test]
     fn a_colour_that_is_not_hexadecimal_is_refused_without_panicking() {
-        // `#€€` is six bytes, so the length alone would let it through to a byte cut inside a
-        // character, which panics.
+        // `#€€` is six bytes, so a byte cut would land inside a character and panic.
         for bad in ["#€€", "#€€€", "#€€€€", "#12345", "#1234567", "123456", "#GGGGGG", "#12345€"] {
             assert!(parse_colour(bad).is_err(), "{bad:?} is refused");
         }
