@@ -143,7 +143,7 @@ Meaning: `accent`, `accent_text`, `context`, `context_tint`, `green`, `red`, `am
 | `ui.themeFile` with `name` | Uses that theme; no name follows the system again |
 | `ui.themeLoad` | Opens a theme file from anywhere, keeps it in the themes folder and uses it |
 | `ui.theme` with `dark` | Uses Light or Dark, the brightness asked for |
-| `ui.scale` with `factor` | Interface scale, held between 0.75 and 2.0 |
+| `ui.scale` with `factor` | Interface scale, held between 80% and 200% |
 | `ui.themeReload` | Reads the themes folder again |
 
 ## What a theme cannot change

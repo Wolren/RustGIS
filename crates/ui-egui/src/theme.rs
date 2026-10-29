@@ -234,9 +234,9 @@ impl Metrics {
     }
 }
 
-/// The interface scale a command accepts, held between 75 and 200 percent.
+/// The interface scale a command accepts, held between 80 and 200 percent.
 pub fn clamp_scale(scale: f32) -> f32 {
-    if scale.is_finite() { scale.clamp(0.75, 2.0) } else { 1.0 }
+    if scale.is_finite() { scale.clamp(0.8, 2.0) } else { 1.0 }
 }
 
 #[derive(Clone, Debug, PartialEq)]
