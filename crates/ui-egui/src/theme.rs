@@ -983,6 +983,17 @@ mod tests {
     }
 
     #[test]
+    fn a_dark_file_on_a_light_base_draws_dark() {
+        let text = r##"{"schema": 1, "name": "Nox", "extends": "Light", "dark": true, "colours": {"accent": "#7C3AED"}}"##;
+        let theme = Theme::parse("Nox", text).expect("a file may extend Light and be dark");
+        let ctx = egui::Context::default();
+        apply(&ctx, &theme.tokens, &theme.metrics);
+        assert!(theme.dark && theme.tokens.dark, "the theme reports dark");
+        assert!(ctx.global_style().visuals.dark_mode, "so egui draws the parts the file does not colour in dark mode");
+        assert_eq!(theme.tokens.pane, Theme::builtin()[0].tokens.pane, "and the colours it extends stay");
+    }
+
+    #[test]
     fn a_name_of_symbols_still_gets_a_file_name() {
         assert_eq!(stem_of("★★★"), "theme", "a name with no letters or digits still saves");
         assert_eq!(stem_of("Cobalt Blue!"), "cobalt-blue", "letters and digits are kept, the rest as -");
