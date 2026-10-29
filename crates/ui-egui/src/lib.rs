@@ -542,7 +542,7 @@ pub struct UiState {
     pub dark: bool,
     /// The theme file in use, by name. Empty follows `dark` and the system.
     pub theme_name: String,
-    /// The interface scale, 0.75 to 2.0, applied as egui's zoom factor.
+    /// The interface scale, 0.8 to 2.0, applied as egui's zoom factor.
     pub interface_scale: f32,
     /// Live measurement and map scale-bar units, chosen in Home › Measure.
     pub measurement_imperial: bool,
@@ -1675,6 +1675,10 @@ impl RustGisApp {
     }
 
     fn load_theme_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        if std::fs::metadata(path).is_ok_and(|m| m.len() > theme::MAX_THEME_BYTES) {
+            let limit = theme::MAX_THEME_BYTES / 1024;
+            return Err(format!("{}: a theme file is at most {limit} KB", path.display()));
+        }
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
         let theme = theme::Theme::parse(&stem, &text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -4040,7 +4044,20 @@ impl RustGisApp {
             self.applied_theme = Some((self.ui.theme_name.clone(), self.ui.dark));
             self.map.invalidate();
         }
-        if self.applied_scale != Some(self.ui.interface_scale) {
+        // egui's zoom keys (Ctrl +, Ctrl -, Ctrl 0) change the context: adopt that scale.
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.ui.interface_scale).abs() > 0.001 {
+            let wanted = theme::clamp_scale(zoom);
+            if (wanted - zoom).abs() > 0.001 {
+                ctx.set_zoom_factor(wanted);
+            }
+            self.ui.interface_scale = wanted;
+            if let Some(save) = &self.services.save_pref {
+                save("ui_scale", &format!("{wanted:.2}"));
+            }
+            self.applied_scale = Some(wanted);
+            self.map.invalidate();
+        } else if self.applied_scale != Some(self.ui.interface_scale) {
             ctx.set_zoom_factor(self.ui.interface_scale);
             self.applied_scale = Some(self.ui.interface_scale);
             self.map.invalidate();
@@ -4519,6 +4536,42 @@ mod look_tests {
         let (follows, name) = app.theme_shown(true);
         assert!(follows, "a reported theme is followed");
         assert_eq!(name, "Follow the System");
+    }
+
+    #[test]
+    fn a_picked_theme_file_bigger_than_the_limit_is_refused_unread() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let path = dir.path().join("huge.json");
+        std::fs::write(&path, "x".repeat(70 * 1024)).expect("the file");
+        let mut app = app_with(&[]);
+        let why = app.load_theme_file(&path).expect_err("a 70 KB file is refused");
+        assert!(why.contains("64 KB"), "{why}");
+    }
+
+    #[test]
+    fn the_zoom_keys_and_the_menu_share_one_scale() {
+        let mut app = app_with(&[]);
+        app.take_saved_look();
+        let log = saved_by(&mut app);
+        let ctx = egui::Context::default();
+        // A zoom factor lands at the end of the pass that sets it.
+        let settle = |ctx: &egui::Context| {
+            let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
+            pass.textures_delta.clear();
+        };
+        // A zoom key moved the context: the menu takes that scale and keeps it.
+        ctx.set_zoom_factor(1.25);
+        settle(&ctx);
+        app.logic(&ctx);
+        assert_eq!(app.ui.interface_scale, 1.25, "the menu follows the zoom keys");
+        assert!(log.lock().expect("the log").iter().any(|(k, v)| k == "ui_scale" && v == "1.25"));
+        // Beyond the limit it is held, and the context is put back to the limit.
+        ctx.set_zoom_factor(3.0);
+        settle(&ctx);
+        app.logic(&ctx);
+        settle(&ctx);
+        assert_eq!(app.ui.interface_scale, 2.0, "the scale is held at 200 percent");
+        assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "the context is held too");
     }
 
     #[test]
