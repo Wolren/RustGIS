@@ -24,6 +24,11 @@ pub enum Over {
 /// Reads a theme file without trusting its length: a pipe or a device cannot exhaust memory.
 pub fn read_text(path: &std::path::Path) -> Result<String, Over> {
     use std::io::Read;
+    // Only a plain file is opened: opening a pipe blocks until a writer arrives.
+    let meta = std::fs::metadata(path).map_err(|e| Over::Reason(e.to_string()))?;
+    if !meta.file_type().is_file() {
+        return Err(Over::Reason(i18n::fmt("this is not a file", &[])));
+    }
     let file = std::fs::File::open(path).map_err(|e| Over::Reason(e.to_string()))?;
     let mut bytes = Vec::new();
     file.take(MAX_THEME_BYTES + 1).read_to_end(&mut bytes).map_err(|e| Over::Reason(e.to_string()))?;
@@ -631,8 +636,9 @@ fn clean_name(name: &str) -> String {
 
 /// Keeps the file it replaces beside it as `<name>.json.bak`: a folder copy may hold edits.
 fn backup_before_replace(path: &std::path::Path, text: &str) -> Result<(), String> {
-    let Ok(old) = std::fs::read(path) else { return Ok(()) };
-    if old == text.as_bytes() {
+    // The same bound as any other read: a file over the limit is left alone, not loaded whole.
+    let Ok(old) = read_text(path) else { return Ok(()) };
+    if old == text {
         return Ok(());
     }
     let kept = path.with_extension("json.bak");
@@ -1090,6 +1096,15 @@ mod tests {
         let (found, errors) = Theme::available_in(Some(&dir));
         assert!(errors.is_empty(), "{errors:?}");
         assert!(found.iter().any(|t| t.name == "Mine"), "the file is read whatever the case of its extension");
+    }
+
+    #[test]
+    fn only_a_plain_file_is_opened() {
+        let dir = theme_folder("rustgis-theme-dir-test", &[]);
+        match read_text(&dir) {
+            Err(Over::Reason(why)) => assert!(why.contains("not a file"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
