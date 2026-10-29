@@ -898,7 +898,6 @@ pub struct RustGisApp {
     pub connect: connectui::ConnectState,
     fonts_frames: u32,
     applied_theme: Option<(String, bool)>,
-    applied_scale: Option<f32>,
     /// The themes the app can offer: built in, then the ones in the user's themes folder.
     pub themes: Vec<theme::Theme>,
     /// The theme files that did not load, with the reason.
@@ -1077,7 +1076,6 @@ impl RustGisApp {
             assistant: assistantpane::AssistantState::default(),
             fonts_frames: 0,
             applied_theme: None,
-            applied_scale: None,
             themes: Vec::new(),
             theme_errors: Vec::new(),
             themes_stamp: 0,
@@ -1690,13 +1688,7 @@ impl RustGisApp {
         let said = |reason: &str| i18n::fmt("{path}: {reason}", &[("path", &path.display().to_string()), ("reason", reason)]);
         let text = match theme::read_text(path) {
             Ok(text) => text,
-            Err(theme::Over::TooBig) => {
-                let limit = theme::MAX_THEME_BYTES / 1024;
-                return Err(i18n::fmt(
-                    "{path}: a theme file is at most {limit} KB",
-                    &[("path", &path.display().to_string()), ("limit", &limit.to_string())],
-                ));
-            }
+            Err(theme::Over::TooBig) => return Err(theme::too_big(path)),
             Err(theme::Over::Reason(reason)) => return Err(said(&reason)),
         };
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
@@ -2328,7 +2320,10 @@ impl RustGisApp {
             }
             // Picks a theme by name; no name follows the system again.
             "ui.themeFile" => {
-                let name = p.get("name").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                let name = match p.get("name") {
+                    Some(given) => given.as_str().ok_or_else(|| i18n::fmt("ui.themeFile needs a name string", &[]))?.trim().to_string(),
+                    None => String::new(),
+                };
                 if name.is_empty() {
                     self.ui.theme_name.clear();
                     self.ui.dark_follows_system = true;
@@ -2345,7 +2340,10 @@ impl RustGisApp {
                 self.load_theme_file(std::path::Path::new(&path))?;
             }
             "ui.scale" => {
-                let factor = p.get("factor").and_then(Value::as_f64).map_or(1.0, |f| f as f32);
+                let factor = match p.get("factor") {
+                    Some(given) => given.as_f64().ok_or_else(|| i18n::fmt("ui.scale needs a number at factor", &[]))? as f32,
+                    None => 1.0,
+                };
                 self.ui.interface_scale = theme::clamp_scale(factor);
                 if let Some(save) = &self.services.save_pref {
                     save("ui_scale", &format!("{:.2}", self.ui.interface_scale));
@@ -4075,9 +4073,9 @@ impl RustGisApp {
         }
         // egui's own zoom keys would change the zoom behind the Interface Scale menu.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        if self.applied_scale != Some(self.ui.interface_scale) {
+        // The menu is the only control, so a zoom from anywhere else is put back the same frame.
+        if (ctx.zoom_factor() - self.ui.interface_scale).abs() > 0.001 {
             ctx.set_zoom_factor(self.ui.interface_scale);
-            self.applied_scale = Some(self.ui.interface_scale);
             self.map.invalidate();
         }
     }
@@ -4597,6 +4595,13 @@ mod look_tests {
         settle(&ctx);
         assert_eq!(app.ui.interface_scale, 2.0, "the scale is held at 200 percent");
         assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "the context is held too");
+        // A zoom from anywhere else is put back, so the menu and the drawing never disagree.
+        ctx.set_zoom_factor(1.0);
+        settle(&ctx);
+        app.logic(&ctx);
+        settle(&ctx);
+        assert_eq!(app.ui.interface_scale, 2.0, "the menu does not follow a zoom it did not make");
+        assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "and the context is put back to the menu's value");
     }
 
     #[test]
@@ -4622,6 +4627,17 @@ mod look_tests {
         app.take_saved_look();
         assert!(!app.ui.dark_follows_system, "a saved brightness is a brightness, not a follow");
         assert!(!app.ui.dark);
+    }
+
+    #[test]
+    fn a_parameter_of_the_wrong_type_is_refused() {
+        let mut app = app_with(&[]);
+        let why = app.run("ui.themeFile", serde_json::json!({ "name": 5 })).expect_err("a name must be a string");
+        assert!(why.contains("ui.themeFile"), "{why}");
+        let why = app.run("ui.scale", serde_json::json!({ "factor": "big" })).expect_err("a factor must be a number");
+        assert!(why.contains("ui.scale"), "{why}");
+        app.run("ui.scale", serde_json::json!({ "factor": 1.25 })).expect("a number is accepted");
+        assert_eq!(app.ui.interface_scale, 1.25);
     }
 
     #[test]

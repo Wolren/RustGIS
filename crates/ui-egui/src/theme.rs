@@ -25,12 +25,19 @@ pub enum Over {
 pub fn read_text(path: &std::path::Path) -> Result<String, Over> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| Over::Reason(e.to_string()))?;
-    let mut text = String::new();
-    file.take(MAX_THEME_BYTES + 1).read_to_string(&mut text).map_err(|e| Over::Reason(e.to_string()))?;
-    match text.len() as u64 > MAX_THEME_BYTES {
-        true => Err(Over::TooBig),
-        false => Ok(text),
+    let mut bytes = Vec::new();
+    file.take(MAX_THEME_BYTES + 1).read_to_end(&mut bytes).map_err(|e| Over::Reason(e.to_string()))?;
+    // Measured in bytes: a cut inside a character is a file too big, not a file badly encoded.
+    if bytes.len() as u64 > MAX_THEME_BYTES {
+        return Err(Over::TooBig);
     }
+    String::from_utf8(bytes).map_err(|e| Over::Reason(e.to_string()))
+}
+
+/// The refusal a file over the limit gets, the same from the folder and from the picker.
+pub fn too_big(path: &std::path::Path) -> String {
+    let limit = (MAX_THEME_BYTES / 1024).to_string();
+    why(path, &i18n::fmt("a theme file is at most {limit} KB", &[("limit", &limit)]))
 }
 
 /// A path and the reason it failed, as the menu shows it.
@@ -205,6 +212,11 @@ impl Tokens {
 /// egui temp data key that lets every widget read the applied colours.
 fn tokens_id() -> egui::Id {
     egui::Id::unique("rustgis.theme.tokens")
+}
+
+/// A theme file is a `.json` whatever the case of the extension.
+fn is_theme_file(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
 }
 
 /// A file's `metrics` block: every field optional, and an unknown name is reported by name.
@@ -468,7 +480,7 @@ impl Theme {
         let Ok(read) = std::fs::read_dir(dir) else {
             return (themes, errors);
         };
-        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| is_theme_file(p)).collect();
         files.sort();
         for path in files {
             let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
@@ -481,30 +493,27 @@ impl Theme {
                     },
                     Err(e) => errors.push(why(&path, &e)),
                 },
-                Err(Over::TooBig) => {
-                    let reason = i18n::fmt("larger than {bytes} bytes", &[("bytes", &MAX_THEME_BYTES.to_string())]);
-                    errors.push(why(&path, &reason));
-                }
+                Err(Over::TooBig) => errors.push(too_big(&path)),
                 Err(Over::Reason(reason)) => errors.push(why(&path, &reason)),
             }
         }
         (themes, errors)
     }
 
-    /// Hash of each file's name and bytes, so a saved file is noticed even inside one mtime tick.
+    /// Hash of each file's name, size and mtime, from metadata alone: no file is read.
     pub fn folder_signature(dir: Option<&std::path::Path>) -> u64 {
         use std::hash::{Hash, Hasher};
         let Some(dir) = dir else { return 0 };
         let Ok(read) = std::fs::read_dir(dir) else { return 0 };
-        let mut stamps: Vec<(String, u64)> = read
+        let mut stamps: Vec<(String, u64, u128)> = read
             .flatten()
-            .filter(|e| e.path().extension().is_some_and(|e| e == "json"))
+            .filter(|e| is_theme_file(&e.path()))
             .filter_map(|e| {
                 let path = e.path();
-                let bytes = std::fs::read(&path).ok()?;
-                let mut file = std::collections::hash_map::DefaultHasher::new();
-                bytes.hash(&mut file);
-                Some((path.file_name()?.to_string_lossy().into_owned(), file.finish()))
+                let meta = e.metadata().ok()?;
+                // Metadata carries a std clock; this runs only where a themes folder exists.
+                let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+                Some((path.file_name()?.to_string_lossy().into_owned(), meta.len(), saved))
             })
             .collect();
         stamps.sort();
@@ -518,11 +527,31 @@ impl Theme {
         rustgis_engine::data::dirs::config_dir().map(|d| d.join("themes"))
     }
 
+    /// The file that holds this theme: its own name, or the next free one when another theme took it.
+    fn save_path(&self, dir: &std::path::Path) -> Result<PathBuf, String> {
+        let stem = stem_of(&self.name);
+        for at in 1..=99 {
+            let name = if at == 1 { format!("{stem}.json") } else { format!("{stem}-{at}.json") };
+            let path = dir.join(name);
+            match read_text(&path) {
+                Ok(text) => {
+                    if Theme::parse(&stem, &text).is_ok_and(|found| found.name == self.name) {
+                        return Ok(path);
+                    }
+                }
+                // A file of another theme, or one too big to be read, is left alone.
+                Err(Over::TooBig) => {}
+                Err(Over::Reason(_)) => return Ok(path),
+            }
+        }
+        Err(why(dir, &i18n::fmt("no free file name for {name}", &[("name", &self.name)])))
+    }
+
     /// The file name of a theme, with each non-alphanumeric character as `-`.
     pub fn save_user(&self) -> Result<PathBuf, String> {
         let dir = Self::user_dir().ok_or_else(|| i18n::fmt("No settings folder to keep a theme in.", &[]))?;
         std::fs::create_dir_all(&dir).map_err(|e| why(&dir, &e.to_string()))?;
-        let path = dir.join(format!("{}.json", stem_of(&self.name)));
+        let path = self.save_path(&dir)?;
         let text = self.to_json()?;
         backup_before_replace(&path, &text)?;
         std::fs::write(&path, text).map_err(|e| why(&path, &e.to_string()))?;
@@ -610,6 +639,15 @@ fn backup_before_replace(path: &std::path::Path, text: &str) -> Result<(), Strin
     std::fs::write(&kept, old).map_err(|e| why(&kept, &e.to_string()))
 }
 
+/// A value as a message shows it: long enough to recognise, short enough to stay one line.
+fn clip(text: &str) -> String {
+    let mut out: String = text.chars().take(32).collect();
+    if out.chars().count() < text.chars().count() {
+        out.push('…');
+    }
+    out
+}
+
 /// The stem of a theme's file name; a name of marks and symbols still gets one.
 fn stem_of(name: &str) -> String {
     let dashed: String = name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
@@ -619,12 +657,16 @@ fn stem_of(name: &str) -> String {
 
 /// A non-ASCII colour is refused before the byte cut, which would land inside a character.
 fn parse_colour(text: &str) -> Result<Color32, String> {
-    let digits = text.strip_prefix('#').ok_or_else(|| i18n::fmt("is not a #RRGGBB colour: {text}", &[("text", text)]))?;
-    let bad = || i18n::fmt("is not a #RRGGBB or #RRGGBBAA colour: {text}", &[("text", text)]);
+    let shown = clip(text);
+    let digits = text.strip_prefix('#').ok_or_else(|| i18n::fmt("is not a #RRGGBB colour: {text}", &[("text", &shown)]))?;
+    let bad = || i18n::fmt("is not a #RRGGBB or #RRGGBBAA colour: {text}", &[("text", &shown)]);
     if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(bad());
     }
-    let pair = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| bad());
+    let pair = |at: usize| {
+        let pair = digits.get(at..at + 2).ok_or_else(bad)?;
+        u8::from_str_radix(pair, 16).map_err(|_| bad())
+    };
     match digits.len() {
         6 => Ok(Color32::from_rgb(pair(0)?, pair(2)?, pair(4)?)),
         8 => Ok(Color32::from_rgba_unmultiplied(pair(0)?, pair(2)?, pair(4)?, pair(6)?)),
@@ -1021,6 +1063,48 @@ mod tests {
         // Writing the same text again leaves the backup alone.
         backup_before_replace(&path, &picked).expect("no backup needed");
         assert_eq!(std::fs::read_to_string(dir.join("mine.json.bak")).expect("the backup file"), edited);
+    }
+
+    #[test]
+    fn two_names_that_share_a_stem_keep_two_files() {
+        let dir = theme_folder("rustgis-theme-stem-test", &[]);
+        let mut first = light();
+        first.name = "Cobalt Blue".to_string();
+        let first_at = first.save_path(&dir).expect("a free name");
+        std::fs::write(&first_at, first.to_json().expect("json")).expect("the file");
+        let mut second = light();
+        second.name = "Cobalt-Blue".to_string();
+        let second_at = second.save_path(&dir).expect("another free name");
+        std::fs::write(&second_at, second.to_json().expect("json")).expect("the file");
+        assert_ne!(first_at, second_at, "two themes that share a stem keep two files");
+        assert_eq!(first.save_path(&dir).expect("its own file"), first_at, "a theme finds the file that holds it");
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(found.iter().filter(|t| t.name.starts_with("Cobalt")).count(), 2, "both load");
+    }
+
+    #[test]
+    fn a_theme_file_with_an_upper_case_extension_is_read() {
+        let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
+        let dir = theme_folder("rustgis-theme-upper-test", &[("MINE.JSON", &mine)]);
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(found.iter().any(|t| t.name == "Mine"), "the file is read whatever the case of its extension");
+    }
+
+    #[test]
+    fn a_bad_value_is_echoed_short() {
+        assert_eq!(clip("abc"), "abc", "a short value is kept as it is");
+        assert!(clip(&"x".repeat(500)).chars().count() <= 33, "a long value is cut to one line");
+    }
+
+    #[test]
+    fn a_file_over_the_limit_reports_the_limit_not_the_encoding() {
+        let dir = theme_folder("rustgis-theme-multibyte-test", &[]);
+        let path = dir.join("wide.json");
+        // Two bytes each, so the cut lands inside a character.
+        std::fs::write(&path, "ą".repeat(MAX_THEME_BYTES as usize / 2 + 1)).expect("the file");
+        assert!(matches!(read_text(&path), Err(Over::TooBig)), "the size is reported, not the encoding");
     }
 
     #[test]

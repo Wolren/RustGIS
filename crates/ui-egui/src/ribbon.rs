@@ -3478,7 +3478,7 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                 follow = follow.on_disabled_hover_text(tl!("This platform does not report the system theme"));
             }
             if follow.clicked() {
-                let _ = app.run("ui.themeFile", Value::Null);
+                theme_action(app, "ui.themeFile", Value::Null);
                 ui.close();
             }
             for found in &themes {
@@ -3495,7 +3495,7 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
                 if ui.add(egui::Button::selectable(false, tl!("Reload Themes"))).clicked() {
-                    let _ = app.run("ui.themeReload", Value::Null);
+                    theme_action(app, "ui.themeReload", Value::Null);
                     ui.close();
                 }
             }
