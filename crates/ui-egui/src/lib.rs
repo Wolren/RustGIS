@@ -1607,13 +1607,24 @@ impl RustGisApp {
         self.themes = themes;
         self.theme_errors = errors;
         self.themes_stamp = theme::Theme::folder_signature(theme::Theme::user_dir().as_deref());
+        self.sync_named_brightness();
         // Reset so a file that reads differently is applied again on the next frame.
         self.applied_theme = None;
     }
 
+    /// A file saved as the other brightness takes the interface with it, so name and look agree.
+    fn sync_named_brightness(&mut self) {
+        if self.ui.theme_name.is_empty() {
+            return;
+        }
+        if let Some(dark) = self.themes.iter().find(|t| t.name == self.ui.theme_name).map(|t| t.dark) {
+            self.ui.dark = dark;
+        }
+    }
+
     /// Reads the folder again when a file in it was added, removed or saved, at most once a second.
     fn refresh_themes(&mut self, ctx: &egui::Context) {
-        let Some(dir) = theme::Theme::user_dir().filter(|d| d.is_dir()) else { return };
+        let Some(dir) = theme::Theme::user_dir() else { return };
         ctx.request_repaint_after(web_time::Duration::from_secs(1));
         let now = ctx.input(|i| i.time);
         if now < self.themes_checked + 1.0 {
@@ -1652,9 +1663,9 @@ impl RustGisApp {
             self.ui.dark = picked.dark;
             self.ui.dark_follows_system = false;
         } else if let Some(dark) = pref(self, "dark") {
-            // Toggled with Dark Mode and no theme file: remember which of the two it was.
+            // "auto" was Follow the System; a toggle stores the brightness it left.
             self.ui.dark = dark == "true";
-            self.ui.dark_follows_system = false;
+            self.ui.dark_follows_system = dark == "auto";
         }
         let scale = pref(self, "ui_scale").and_then(|v| v.parse::<f32>().ok());
         self.ui.interface_scale = scale.map_or(1.0, theme::clamp_scale);
@@ -2306,6 +2317,7 @@ impl RustGisApp {
                     self.ui.dark_follows_system = true;
                     if let Some(save) = &self.services.save_pref {
                         save("theme", "");
+                        save("dark", "auto");
                     }
                 } else {
                     self.use_theme(&name)?;
@@ -4044,20 +4056,9 @@ impl RustGisApp {
             self.applied_theme = Some((self.ui.theme_name.clone(), self.ui.dark));
             self.map.invalidate();
         }
-        // egui's zoom keys (Ctrl +, Ctrl -, Ctrl 0) change the context: adopt that scale.
-        let zoom = ctx.zoom_factor();
-        if (zoom - self.ui.interface_scale).abs() > 0.001 {
-            let wanted = theme::clamp_scale(zoom);
-            if (wanted - zoom).abs() > 0.001 {
-                ctx.set_zoom_factor(wanted);
-            }
-            self.ui.interface_scale = wanted;
-            if let Some(save) = &self.services.save_pref {
-                save("ui_scale", &format!("{wanted:.2}"));
-            }
-            self.applied_scale = Some(wanted);
-            self.map.invalidate();
-        } else if self.applied_scale != Some(self.ui.interface_scale) {
+        // egui's own zoom keys would change the zoom behind the Interface Scale menu.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        if self.applied_scale != Some(self.ui.interface_scale) {
             ctx.set_zoom_factor(self.ui.interface_scale);
             self.applied_scale = Some(self.ui.interface_scale);
             self.map.invalidate();
@@ -4549,7 +4550,7 @@ mod look_tests {
     }
 
     #[test]
-    fn the_zoom_keys_and_the_menu_share_one_scale() {
+    fn the_menu_owns_the_interface_scale() {
         let mut app = app_with(&[]);
         app.take_saved_look();
         let log = saved_by(&mut app);
@@ -4559,19 +4560,54 @@ mod look_tests {
             let mut pass = ctx.run_ui(egui::RawInput::default(), |_| {});
             pass.textures_delta.clear();
         };
-        // A zoom key moved the context: the menu takes that scale and keeps it.
-        ctx.set_zoom_factor(1.25);
+        app.logic(&ctx);
+        settle(&ctx);
+        assert!(!ctx.options(|o| o.zoom_with_keyboard), "the zoom keys are off, so the scale cannot move behind the menu");
+        // A scale from the menu is drawn, and the next frame does not undo it.
+        app.run("ui.scale", serde_json::json!({ "factor": 1.25 })).expect("the command");
+        app.logic(&ctx);
         settle(&ctx);
         app.logic(&ctx);
-        assert_eq!(app.ui.interface_scale, 1.25, "the menu follows the zoom keys");
+        settle(&ctx);
+        assert_eq!(app.ui.interface_scale, 1.25, "the menu scale is kept, not read back as the old zoom");
+        assert!((ctx.zoom_factor() - 1.25).abs() < 0.001, "and the interface is drawn at it");
         assert!(log.lock().expect("the log").iter().any(|(k, v)| k == "ui_scale" && v == "1.25"));
-        // Beyond the limit it is held, and the context is put back to the limit.
-        ctx.set_zoom_factor(3.0);
+        // Past the limit the command holds the scale.
+        app.run("ui.scale", serde_json::json!({ "factor": 3.0 })).expect("the command");
+        app.logic(&ctx);
         settle(&ctx);
         app.logic(&ctx);
         settle(&ctx);
         assert_eq!(app.ui.interface_scale, 2.0, "the scale is held at 200 percent");
         assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "the context is held too");
+    }
+
+    #[test]
+    fn following_the_system_survives_a_restart() {
+        let mut app = app_with(&[("theme", ""), ("dark", "auto")]);
+        app.take_saved_look();
+        assert!(app.ui.dark_follows_system, "the choice to follow is remembered, not read as a toggle");
+        let mut app = app_with(&[("theme", ""), ("dark", "false")]);
+        app.take_saved_look();
+        assert!(!app.ui.dark_follows_system, "a saved brightness is a brightness, not a follow");
+        assert!(!app.ui.dark);
+    }
+
+    #[test]
+    fn a_theme_saved_as_the_other_brightness_takes_the_interface_with_it() {
+        let mut app = app_with(&[]);
+        let mut file = builtin(true);
+        file.name = "Mine".to_string();
+        app.themes = vec![file];
+        app.ui.theme_name = "Mine".to_string();
+        app.ui.dark = true;
+        // The file is saved as a light theme while the app shows the dark one.
+        let mut file = builtin(true);
+        file.name = "Mine".to_string();
+        file.dark = false;
+        app.themes = vec![file];
+        app.sync_named_brightness();
+        assert!(!app.ui.dark, "the interface takes the brightness of the theme it names");
     }
 
     #[test]
@@ -4582,6 +4618,10 @@ mod look_tests {
         assert!(app.ui.dark, "Dark Mode was on when it was last closed");
         assert!(!app.ui.dark_follows_system);
         assert_eq!(app.ui.interface_scale, 1.0, "no scale saved is the normal one");
+    }
+
+    fn builtin(dark: bool) -> theme::Theme {
+        theme::Theme::builtin().into_iter().find(|t| t.dark == dark).expect("a built-in theme ships")
     }
 
     fn saved_by(app: &mut RustGisApp) -> std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> {

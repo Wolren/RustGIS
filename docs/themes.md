@@ -21,15 +21,16 @@ A user file whose `name` matches a built-in replaces it. A reworked Light sits i
 
 Settings › Theme lists Follow the System and every theme that loaded. Light and Dark are the
 brightness choices, so there is no separate Dark Mode switch. A choice is applied at once and
-saved for the next start. Interface scale, 80% to 200%, sits beside it.
+saved for the next start. Interface scale, 80% to 200%, sits beside it, and it is the only
+control for it: Ctrl + and Ctrl - do nothing, so the scale the app records is the scale it draws.
 
 Follow the System follows the platform theme where the platform reports one: Windows, macOS and the
 browser, through `prefers-color-scheme`. Linux desktops report no theme, so the entry is greyed out
 there and the button names the brightness in force instead.
 
 To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in
-the themes folder; edit that copy and the app follows it. A file that does not load is listed in
-red at the bottom of the same menu, with the token at fault.
+the themes folder; edit that copy and the app follows it. Loading a file whose `name` matches a theme already in the folder replaces that copy.
+A file that does not load is listed in red at the bottom of the same menu, with the token at fault.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
 folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in
@@ -59,7 +60,8 @@ the better start.
 
 ## The file
 
-Without `extends` every colour and size is required. The built-in Light is the reference:
+Without `extends` every colour is required, and a size the file leaves out keeps the standard one.
+An unknown name, colour or size is refused by name. The built-in Light is the reference:
 
 ```json
 {
