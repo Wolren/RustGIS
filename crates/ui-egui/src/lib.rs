@@ -4047,6 +4047,22 @@ impl RustGisApp {
         }
     }
 
+    /// The entry the Theme button names. A platform that reports no theme cannot be followed, so
+    /// the brightness in force is named instead. winit reports no system theme on Linux.
+    pub fn theme_shown(&self, system_reports: bool) -> (bool, String) {
+        let follows = self.ui.theme_name.is_empty() && self.ui.dark_follows_system && system_reports;
+        let name = if !self.ui.theme_name.is_empty() {
+            self.ui.theme_name.clone()
+        } else if follows {
+            tl!("Follow the System").to_string()
+        } else if self.ui.dark {
+            tl!("Dark").to_string()
+        } else {
+            tl!("Light").to_string()
+        };
+        (follows, name)
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         // Fonts installed by `logic` take effect on the next frame.
@@ -4487,6 +4503,22 @@ mod look_tests {
         assert!(!app.ui.dark_follows_system, "a chosen theme does not follow the system");
         assert_eq!(app.ui.interface_scale, 2.0, "the scale is held at 200 percent");
         assert_eq!(app.current_theme().name, "Mine");
+    }
+
+    #[test]
+    fn a_platform_that_reports_no_theme_names_the_brightness() {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let mut app = app_with(&[]);
+        app.take_saved_look();
+        assert!(app.ui.dark_follows_system, "a fresh app follows the system");
+        let (follows, name) = app.theme_shown(false);
+        assert!(!follows, "a platform that reports no theme is not followed");
+        assert_eq!(name, "Light");
+        app.ui.dark = true;
+        assert_eq!(app.theme_shown(false).1, "Dark");
+        let (follows, name) = app.theme_shown(true);
+        assert!(follows, "a reported theme is followed");
+        assert_eq!(name, "Follow the System");
     }
 
     #[test]

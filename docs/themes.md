@@ -23,6 +23,10 @@ Settings › Theme lists Follow the System and every theme that loaded. Light an
 brightness choices, so there is no separate Dark Mode switch. A choice is applied at once and
 saved for the next start. Interface scale, 80% to 200%, sits beside it.
 
+Follow the System follows the platform theme where the platform reports one: Windows, macOS and the
+browser, through `prefers-color-scheme`. Linux desktops report no theme, so the entry is greyed out
+there and the button names the brightness in force instead.
+
 To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in
 the themes folder; edit that copy and the app follows it. A file that does not load is listed in
 red at the bottom of the same menu, with the token at fault.

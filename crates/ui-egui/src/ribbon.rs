@@ -3458,15 +3458,9 @@ fn autosave_menu(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
-    let current = if !app.ui.theme_name.is_empty() {
-        app.ui.theme_name.clone()
-    } else if app.ui.dark_follows_system {
-        tl!("Follow the System").to_string()
-    } else if app.ui.dark {
-        tl!("Dark").to_string()
-    } else {
-        tl!("Light").to_string()
-    };
+    // The browser reports prefers-color-scheme; winit reports nothing on Linux.
+    let system = ui.ctx().system_theme().is_some();
+    let (follows, current) = app.theme_shown(system);
     let label = format!("{}\n{current}", tl!("Theme"));
     let themes = app.themes.clone();
     let errors = app.theme_errors.clone();
@@ -3479,8 +3473,11 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
         &label,
         "The interface colours, spacing and text sizes: a built-in theme or a file from the themes folder.",
         move |ui, app| {
-            let follows = app.ui.theme_name.is_empty() && app.ui.dark_follows_system;
-            if ui.add(egui::Button::selectable(follows, tl!("Follow the System"))).clicked() {
+            let mut follow = ui.add_enabled(system, egui::Button::selectable(follows, tl!("Follow the System")));
+            if !system {
+                follow = follow.on_disabled_hover_text(tl!("This platform does not report the system theme"));
+            }
+            if follow.clicked() {
                 let _ = app.run("ui.themeFile", Value::Null);
                 ui.close();
             }
