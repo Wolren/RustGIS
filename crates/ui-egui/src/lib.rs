@@ -1607,8 +1607,16 @@ impl RustGisApp {
         self.themes = themes;
         self.theme_errors = errors;
         self.sync_named_brightness();
+        self.drop_missing_name();
         // Reset so a file that reads differently is applied again on the next frame.
         self.applied_theme = None;
+    }
+
+    /// A theme that was deleted or stopped loading is not named: the button names what is drawn.
+    fn drop_missing_name(&mut self) {
+        if !self.ui.theme_name.is_empty() && !self.themes.iter().any(|t| t.name == self.ui.theme_name) {
+            self.ui.theme_name.clear();
+        }
     }
 
     /// A file saved as the other brightness takes the interface with it, so name and look agree.
@@ -1642,11 +1650,15 @@ impl RustGisApp {
             .find(|t| t.name == self.ui.theme_name && t.dark == self.ui.dark)
             .or_else(|| self.themes.iter().find(|t| t.dark == self.ui.dark))
             .cloned()
-            .unwrap_or(theme::Theme {
-                name: "Light".to_string(),
-                dark: false,
-                tokens: theme::Tokens::light(),
-                metrics: theme::Metrics::standard(),
+            .unwrap_or_else(|| {
+                let builtin = theme::Theme::builtin();
+                let wanted = builtin.iter().find(|t| t.dark == self.ui.dark).or_else(|| builtin.first());
+                wanted.cloned().unwrap_or(theme::Theme {
+                    name: "Light".to_string(),
+                    dark: false,
+                    tokens: theme::Tokens::light(),
+                    metrics: theme::Metrics::standard(),
+                })
             })
     }
 
@@ -4602,6 +4614,28 @@ mod look_tests {
         settle(&ctx);
         assert_eq!(app.ui.interface_scale, 2.0, "the menu does not follow a zoom it did not make");
         assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "and the context is put back to the menu's value");
+    }
+
+    #[test]
+    fn a_theme_that_stopped_loading_is_not_named() {
+        let mut app = app_with(&[]);
+        app.themes = vec![builtin(false), builtin(true)];
+        app.ui.theme_name = "Gone".to_string();
+        app.drop_missing_name();
+        assert!(app.ui.theme_name.is_empty(), "the name is dropped");
+        assert_eq!(app.current_theme().name, "Light", "and the button names the theme that is drawn");
+    }
+
+    #[test]
+    fn the_fallback_takes_the_brightness_asked_for() {
+        let mut app = app_with(&[]);
+        // A folder theme that calls itself Dark while it is light: nothing loaded matches dark.
+        let mut lied = builtin(false);
+        lied.name = "Dark".to_string();
+        app.themes = vec![lied];
+        app.ui.dark = true;
+        app.ui.theme_name = "Dark".to_string();
+        assert!(app.current_theme().dark, "the drawn theme is a dark one, as asked");
     }
 
     #[test]

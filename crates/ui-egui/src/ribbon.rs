@@ -3478,24 +3478,24 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                 follow = follow.on_disabled_hover_text(tl!("This platform does not report the system theme"));
             }
             if follow.clicked() {
-                theme_action(app, "ui.themeFile", Value::Null);
+                run_notified(app, "ui.themeFile", Value::Null);
                 ui.close();
             }
             for found in &themes {
                 let picked = app.ui.theme_name == found.name;
                 if ui.add(egui::Button::selectable(picked, found.name.as_str())).clicked() {
-                    theme_action(app, "ui.themeFile", json!({ "name": found.name }));
+                    run_notified(app, "ui.themeFile", json!({ "name": found.name }));
                     ui.close();
                 }
             }
             if folder {
                 ui.separator();
                 if ui.add(egui::Button::selectable(false, tl!("Load a Theme from File…"))).clicked() {
-                    theme_action(app, "ui.themeLoad", Value::Null);
+                    run_notified(app, "ui.themeLoad", Value::Null);
                     ui.close();
                 }
                 if ui.add(egui::Button::selectable(false, tl!("Reload Themes"))).clicked() {
-                    theme_action(app, "ui.themeReload", Value::Null);
+                    run_notified(app, "ui.themeReload", Value::Null);
                     ui.close();
                 }
             }
@@ -3511,7 +3511,8 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
 }
 
 /// A failed action is notified, not swallowed.
-fn theme_action(app: &mut RustGisApp, id: &str, params: Value) {
+/// Runs a UI command and shows the reason when it fails.
+fn run_notified(app: &mut RustGisApp, id: &str, params: Value) {
     if let Err(e) = app.run(id, params) {
         app.session.notify(e, true);
     }
@@ -3526,7 +3527,7 @@ fn scale_menu(app: &mut RustGisApp, ui: &mut Ui) {
             let factor = percent as f32 / 100.0;
             let picked = (app.ui.interface_scale - factor).abs() < 0.001;
             if ui.add(egui::Button::selectable(picked, format!("{percent}%"))).clicked() {
-                let _ = app.run("ui.scale", json!({ "factor": factor }));
+                run_notified(app, "ui.scale", json!({ "factor": factor }));
                 ui.close();
             }
         }
