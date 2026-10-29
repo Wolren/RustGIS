@@ -6,11 +6,37 @@ use std::sync::Arc;
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, Visuals};
 
+use crate::i18n;
+
 /// RustGIS brand colour (the Project tab and the logo) and its lighter tint.
 pub const BRAND: Color32 = Color32::from_rgb(0xB8, 0x4A, 0x2C);
 pub const BRAND_DARK: Color32 = Color32::from_rgb(0x96, 0x3A, 0x22);
 /// Contextual tab group colour (Feature Layer, Labeling, Data).
 pub const CONTEXT: Color32 = Color32::from_rgb(0x0E, 0x93, 0x84);
+
+/// Why a theme file could not be read.
+#[derive(Debug)]
+pub enum Over {
+    TooBig,
+    Reason(String),
+}
+
+/// Reads a theme file without trusting its length: a pipe or a device cannot exhaust memory.
+pub fn read_text(path: &std::path::Path) -> Result<String, Over> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| Over::Reason(e.to_string()))?;
+    let mut text = String::new();
+    file.take(MAX_THEME_BYTES + 1).read_to_string(&mut text).map_err(|e| Over::Reason(e.to_string()))?;
+    match text.len() as u64 > MAX_THEME_BYTES {
+        true => Err(Over::TooBig),
+        false => Ok(text),
+    }
+}
+
+/// A path and the reason it failed, as the menu shows it.
+fn why(path: &std::path::Path, reason: &str) -> String {
+    i18n::fmt("{path}: {reason}", &[("path", &path.display().to_string()), ("reason", reason)])
+}
 
 /// The only schema this build reads.
 pub const SCHEMA: u32 = 1;
@@ -357,26 +383,36 @@ impl Theme {
         let raw: Raw = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let name = clean_name(if raw.name.trim().is_empty() { fallback_name } else { raw.name.trim() });
         if raw.schema != SCHEMA {
-            return Err(format!("{name}: theme schema {} is not {SCHEMA}", raw.schema));
+            return Err(i18n::fmt(
+                "{name}: theme schema {found} is not {schema}",
+                &[("name", name.as_str()), ("found", &raw.schema.to_string()), ("schema", &SCHEMA.to_string())],
+            ));
         }
         let extends = raw.extends.is_some();
         let base = match raw.extends.as_deref() {
             None => None,
             Some(wanted) => match Theme::builtin().into_iter().find(|t| t.name == wanted) {
                 Some(found) => Some(found),
-                None => return Err(format!("{name}: extends {wanted}, which is not a built-in theme")),
+                None => {
+                    return Err(i18n::fmt(
+                        "{name}: extends {wanted}, which is not a built-in theme",
+                        &[("name", name.as_str()), ("wanted", wanted)],
+                    ));
+                }
             },
         };
         let unknown: Vec<&str> = raw.colours.keys().map(String::as_str).filter(|k| !TOKENS.contains(k)).collect();
         if !unknown.is_empty() {
-            return Err(format!("{name}: unknown {}", unknown.join(", ")));
+            let names = unknown.join(", ");
+            return Err(i18n::fmt("{name}: unknown {names}", &[("name", name.as_str()), ("names", &names)]));
         }
         let missing: Vec<&str> = match extends {
             true => Vec::new(),
             false => TOKENS.iter().copied().filter(|t| !raw.colours.contains_key(*t)).collect(),
         };
         if !missing.is_empty() {
-            return Err(format!("{name}: missing {}", missing.join(", ")));
+            let names = missing.join(", ");
+            return Err(i18n::fmt("{name}: missing {names}", &[("name", name.as_str()), ("names", &names)]));
         }
         let fallback = base.unwrap_or_else(|| Theme {
             name: name.clone(),
@@ -386,12 +422,15 @@ impl Theme {
         });
         let mut tokens = fallback.tokens;
         for (key, value) in &raw.colours {
-            let colour = parse_colour(value).map_err(|e| format!("{name}: {key} {e}"))?;
+            let colour = parse_colour(value)
+                .map_err(|e| i18n::fmt("{name}: {key} {reason}", &[("name", name.as_str()), ("key", key.as_str()), ("reason", &e)]))?;
             if let Some(slot) = slot(&mut tokens, key) {
                 *slot = colour;
             }
         }
         let dark = raw.dark.unwrap_or(fallback.dark);
+        // apply() draws from this flag, so a base theme cannot decide the brightness.
+        tokens.dark = dark;
         let mut metrics = fallback.metrics;
         if let Some(file) = raw.metrics {
             file.apply_to(&mut metrics);
@@ -410,7 +449,8 @@ impl Theme {
             colours,
             metrics: Some(MetricsFile::from(&self.metrics)),
         };
-        serde_json::to_string_pretty(&raw).map_err(|e| format!("{}: {e}", self.name))
+        serde_json::to_string_pretty(&raw)
+            .map_err(|e| i18n::fmt("{name}: {reason}", &[("name", self.name.as_str()), ("reason", &e.to_string())]))
     }
 
     /// Built-in themes plus the user folder's readable files; failures are returned apart.
@@ -432,45 +472,39 @@ impl Theme {
         files.sort();
         for path in files {
             let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-            match std::fs::metadata(&path) {
-                Ok(meta) if meta.len() > MAX_THEME_BYTES => {
-                    errors.push(format!("{}: larger than {MAX_THEME_BYTES} bytes", path.display()));
-                    continue;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    errors.push(format!("{}: {e}", path.display()));
-                    continue;
-                }
-            }
-            match std::fs::read_to_string(&path) {
+            match read_text(&path) {
                 Ok(text) => match Theme::parse(&stem, &text) {
                     // A user file named as a built-in replaces it, so a name picks one theme.
                     Ok(theme) => match themes.iter_mut().find(|t| t.name == theme.name) {
                         Some(replaced) => *replaced = theme,
                         None => themes.push(theme),
                     },
-                    Err(e) => errors.push(format!("{}: {e}", path.display())),
+                    Err(e) => errors.push(why(&path, &e)),
                 },
-                Err(e) => errors.push(format!("{}: {e}", path.display())),
+                Err(Over::TooBig) => {
+                    let reason = i18n::fmt("larger than {bytes} bytes", &[("bytes", &MAX_THEME_BYTES.to_string())]);
+                    errors.push(why(&path, &reason));
+                }
+                Err(Over::Reason(reason)) => errors.push(why(&path, &reason)),
             }
         }
         (themes, errors)
     }
 
-    /// Hash of each file's name, size and mtime; any change to the folder changes it.
+    /// Hash of each file's name and bytes, so a saved file is noticed even inside one mtime tick.
     pub fn folder_signature(dir: Option<&std::path::Path>) -> u64 {
         use std::hash::{Hash, Hasher};
         let Some(dir) = dir else { return 0 };
         let Ok(read) = std::fs::read_dir(dir) else { return 0 };
-        let mut stamps: Vec<(String, u64, u128)> = read
+        let mut stamps: Vec<(String, u64)> = read
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|e| e == "json"))
             .filter_map(|e| {
                 let path = e.path();
-                let meta = e.metadata().ok()?;
-                let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
-                Some((path.file_name()?.to_string_lossy().into_owned(), meta.len(), saved))
+                let bytes = std::fs::read(&path).ok()?;
+                let mut file = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut file);
+                Some((path.file_name()?.to_string_lossy().into_owned(), file.finish()))
             })
             .collect();
         stamps.sort();
@@ -484,14 +518,14 @@ impl Theme {
         rustgis_engine::data::dirs::config_dir().map(|d| d.join("themes"))
     }
 
-    /// The file name is the theme name with each non-alphanumeric character as `-`.
+    /// The file name of a theme, with each non-alphanumeric character as `-`.
     pub fn save_user(&self) -> Result<PathBuf, String> {
-        let dir = Self::user_dir().ok_or("no settings folder")?;
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let stem: String = self.name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-        let path = dir.join(format!("{}.json", stem.trim_matches('-')));
+        let dir = Self::user_dir().ok_or_else(|| i18n::fmt("No settings folder to keep a theme in.", &[]))?;
+        std::fs::create_dir_all(&dir).map_err(|e| why(&dir, &e.to_string()))?;
+        let path = dir.join(format!("{}.json", stem_of(&self.name)));
         let text = self.to_json()?;
-        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        backup_before_replace(&path, &text)?;
+        std::fs::write(&path, text).map_err(|e| why(&path, &e.to_string()))?;
         Ok(path)
     }
 }
@@ -566,10 +600,27 @@ fn clean_name(name: &str) -> String {
     if kept.is_empty() { "Theme".to_string() } else { kept.to_string() }
 }
 
+/// Keeps the file it replaces beside it as `<name>.json.bak`: a folder copy may hold edits.
+fn backup_before_replace(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let Ok(old) = std::fs::read(path) else { return Ok(()) };
+    if old == text.as_bytes() {
+        return Ok(());
+    }
+    let kept = path.with_extension("json.bak");
+    std::fs::write(&kept, old).map_err(|e| why(&kept, &e.to_string()))
+}
+
+/// The stem of a theme's file name; a name of marks and symbols still gets one.
+fn stem_of(name: &str) -> String {
+    let dashed: String = name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let stem = dashed.trim_matches('-').to_string();
+    if stem.is_empty() { "theme".to_string() } else { stem }
+}
+
 /// A non-ASCII colour is refused before the byte cut, which would land inside a character.
 fn parse_colour(text: &str) -> Result<Color32, String> {
-    let digits = text.strip_prefix('#').ok_or_else(|| format!("is not a #RRGGBB colour: {text}"))?;
-    let bad = || format!("is not a #RRGGBB or #RRGGBBAA colour: {text}");
+    let digits = text.strip_prefix('#').ok_or_else(|| i18n::fmt("is not a #RRGGBB colour: {text}", &[("text", text)]))?;
+    let bad = || i18n::fmt("is not a #RRGGBB or #RRGGBBAA colour: {text}", &[("text", text)]);
     if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(bad());
     }
@@ -908,7 +959,10 @@ mod tests {
     #[test]
     fn apply_puts_the_theme_on_the_context() {
         let ctx = egui::Context::default();
-        let theme = light();
+        let mut theme = light();
+        theme.tokens.pane = Color32::from_rgb(0x0A, 0x0B, 0x0C);
+        theme.tokens.control = Color32::from_rgb(0x11, 0x12, 0x13);
+        theme.tokens.accent = Color32::from_rgb(0x21, 0x22, 0x23);
         apply(&ctx, &theme.tokens, &theme.metrics);
         let style = ctx.global_style();
         assert_eq!(style.visuals.panel_fill, theme.tokens.pane);
@@ -918,6 +972,52 @@ mod tests {
         assert_eq!(style.text_styles[&egui::TextStyle::Body], regular(12.5));
         assert_eq!(style.text_styles[&egui::TextStyle::Heading], semibold(17.0));
         assert_eq!(Tokens::get(&ctx), theme.tokens, "widgets read the applied colours back");
+    }
+
+    #[test]
+    fn the_brightness_of_the_file_is_the_brightness_drawn() {
+        let text = r#"{"schema": 1, "name": "Mine", "extends": "Light", "dark": true}"#;
+        let theme = Theme::parse("Mine", text).expect("a file may extend Light and be dark");
+        assert!(theme.dark, "the file reports dark");
+        assert!(theme.tokens.dark, "and apply() draws the dark visuals, not the base theme's");
+    }
+
+    #[test]
+    fn a_name_of_symbols_still_gets_a_file_name() {
+        assert_eq!(stem_of("★★★"), "theme", "a name with no letters or digits still saves");
+        assert_eq!(stem_of("Cobalt Blue!"), "cobalt-blue", "letters and digits are kept, the rest as -");
+    }
+
+    #[test]
+    fn a_replaced_theme_file_keeps_the_copy_it_replaced() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json["name"] = "Mine".into();
+        json["colours"]["accent"] = "#123456".into();
+        let edited = json.to_string();
+        json["colours"]["accent"] = "#654321".into();
+        let picked = json.to_string();
+        let dir = theme_folder("rustgis-theme-backup-test", &[("mine.json", &edited)]);
+        let path = dir.join("mine.json");
+        backup_before_replace(&path, &picked).expect("the backup");
+        assert_eq!(std::fs::read_to_string(dir.join("mine.json.bak")).expect("the backup file"), edited);
+        assert_eq!(std::fs::read_to_string(&path).expect("the file"), edited, "the file is not touched yet");
+        // The folder loads one Mine, and the backup is not a theme.
+        std::fs::write(&path, &picked).expect("the file");
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(found.iter().filter(|t| t.name == "Mine").count(), 1, "one Mine is offered");
+        assert!(!found.iter().any(|t| t.name.contains("bak")), "the backup is not a theme");
+        // Writing the same text again leaves the backup alone.
+        backup_before_replace(&path, &picked).expect("no backup needed");
+        assert_eq!(std::fs::read_to_string(dir.join("mine.json.bak")).expect("the backup file"), edited);
+    }
+
+    #[test]
+    fn a_theme_file_over_the_limit_is_not_read() {
+        let dir = theme_folder("rustgis-theme-over-limit", &[]);
+        let path = dir.join("big.json");
+        std::fs::write(&path, "x".repeat(MAX_THEME_BYTES as usize + 1)).expect("the file");
+        assert!(matches!(read_text(&path), Err(Over::TooBig)), "a file over the limit is refused as it is read");
     }
 
     #[test]

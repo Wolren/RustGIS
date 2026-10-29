@@ -1603,10 +1603,11 @@ impl RustGisApp {
     }
 
     fn load_themes(&mut self) {
+        // The stamp before the read, so a save between the two is loaded again rather than lost.
+        self.themes_stamp = theme::Theme::folder_signature(theme::Theme::user_dir().as_deref());
         let (themes, errors) = theme::Theme::available();
         self.themes = themes;
         self.theme_errors = errors;
-        self.themes_stamp = theme::Theme::folder_signature(theme::Theme::user_dir().as_deref());
         self.sync_named_brightness();
         // Reset so a file that reads differently is applied again on the next frame.
         self.applied_theme = None;
@@ -1686,13 +1687,20 @@ impl RustGisApp {
     }
 
     fn load_theme_file(&mut self, path: &std::path::Path) -> Result<(), String> {
-        if std::fs::metadata(path).is_ok_and(|m| m.len() > theme::MAX_THEME_BYTES) {
-            let limit = theme::MAX_THEME_BYTES / 1024;
-            return Err(format!("{}: a theme file is at most {limit} KB", path.display()));
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let said = |reason: &str| i18n::fmt("{path}: {reason}", &[("path", &path.display().to_string()), ("reason", reason)]);
+        let text = match theme::read_text(path) {
+            Ok(text) => text,
+            Err(theme::Over::TooBig) => {
+                let limit = theme::MAX_THEME_BYTES / 1024;
+                return Err(i18n::fmt(
+                    "{path}: a theme file is at most {limit} KB",
+                    &[("path", &path.display().to_string()), ("limit", &limit.to_string())],
+                ));
+            }
+            Err(theme::Over::Reason(reason)) => return Err(said(&reason)),
+        };
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-        let theme = theme::Theme::parse(&stem, &text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let theme = theme::Theme::parse(&stem, &text).map_err(|e| said(&e))?;
         let kept = theme.save_user()?;
         self.load_themes();
         self.use_theme(&theme.name)?;
@@ -2307,7 +2315,16 @@ impl RustGisApp {
             // The theme list in Settings is the one control for brightness; this picks its entry.
             "ui.theme" => {
                 let dark = p.get("dark").and_then(Value::as_bool).unwrap_or(!self.ui.dark);
-                self.use_theme(if dark { "Dark" } else { "Light" })?;
+                // The brightness asked for wins: a user file may rework Light or Dark.
+                self.ui.dark = dark;
+                let wanted = if dark { "Dark" } else { "Light" };
+                self.ui.theme_name =
+                    self.themes.iter().find(|t| t.name == wanted && t.dark == dark).map(|t| t.name.clone()).unwrap_or_default();
+                self.ui.dark_follows_system = false;
+                if let Some(save) = &self.services.save_pref {
+                    save("theme", &self.ui.theme_name);
+                    save("dark", if dark { "true" } else { "false" });
+                }
             }
             // Picks a theme by name; no name follows the system again.
             "ui.themeFile" => {
@@ -4580,6 +4597,20 @@ mod look_tests {
         settle(&ctx);
         assert_eq!(app.ui.interface_scale, 2.0, "the scale is held at 200 percent");
         assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "the context is held too");
+    }
+
+    #[test]
+    fn the_theme_command_lands_on_the_brightness_it_is_given() {
+        let mut app = app_with(&[]);
+        app.take_saved_look();
+        let log = saved_by(&mut app);
+        // A user file reworks Light and reports itself dark: the request, not the name, decides.
+        let mut reworked = builtin(false);
+        reworked.dark = true;
+        app.themes = vec![reworked, builtin(true)];
+        app.run("ui.theme", serde_json::json!({ "dark": false })).expect("the command");
+        assert!(!app.ui.dark, "the brightness asked for is the one in force");
+        assert!(log.lock().expect("the log").iter().any(|(k, v)| k == "dark" && v == "false"));
     }
 
     #[test]

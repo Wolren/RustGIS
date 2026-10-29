@@ -28,9 +28,18 @@ Follow the System follows the platform theme where the platform reports one: Win
 browser, through `prefers-color-scheme`. Linux desktops report no theme, so the entry is greyed out
 there and the button names the brightness in force instead.
 
-To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in
-the themes folder; edit that copy and the app follows it. Loading a file whose `name` matches a theme already in the folder replaces that copy.
-A file that does not load is listed in red at the bottom of the same menu, with the token at fault.
+## What the browser build does
+
+The browser has no config folder, so there is no themes folder there and **Load a Theme from File…**
+does nothing. The browser offers Follow the System, Light, Dark and the interface scale: a theme in a
+file is a desktop route. The two built-in themes are the same files, compiled in, so nothing else
+differs.
+
+To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in the
+themes folder; edit that copy and the app follows it. Loading a file whose `name` matches a theme
+already in the folder replaces that copy, and the copy it replaces is kept beside it as
+`<file>.json.bak`. A file that does not load is listed in red at the bottom of the same menu, with
+the token at fault.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
 folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in
