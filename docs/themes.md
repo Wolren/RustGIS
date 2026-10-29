@@ -14,21 +14,21 @@ drawn by the renderer, which takes its light or dark defaults from the theme's `
 The config folder is `%APPDATA%\RustGIS` on Windows, `~/Library/Application Support/RustGIS` on
 macOS and `$XDG_CONFIG_HOME/rustgis` elsewhere. `RUSTGIS_CONFIG_DIR` overrides it.
 
-A user file whose `name` matches a built-in replaces it: a reworked Light sits in the folder as
+A user file whose `name` matches a built-in replaces it. A reworked Light sits in the folder as
 `light.json`, and the menu lists one Light.
 
 ## Picking one
 
 Settings › Theme lists Follow the System and every theme that loaded. A choice is applied at once
-and saved for the next start; 80% to 200% of interface scale sits beside it.
+and saved for the next start. Interface scale, 80% to 200%, sits beside it.
 
-The quickest way to begin is to take a theme file from anywhere else with **Load a Theme from
-File…**, which keeps a copy in the themes folder: edit that copy and the app follows it. A file
-that does not load is listed in red at the bottom of the same menu, with the token at fault.
+To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in
+the themes folder; edit that copy and the app follows it. A file that does not load is listed in
+red at the bottom of the same menu, with the token at fault.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
-folder's files while it runs. A file that was in use and stops loading leaves the window on the
-nearest built-in until it loads again, with the reason listed in the menu.
+folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in
+until it loads again, and the menu gives the reason.
 
 ## A short theme
 
@@ -37,86 +37,86 @@ nearest built-in until it loads again, with the reason listed in the menu.
 ```json
 {
   "schema": 1,
-  "name": "Sunset",
+  "name": "Cobalt",
   "extends": "Dark",
   "colours": {
-    "pane": "#241710",
-    "ribbon": "#35221A",
-    "text": "#FFE7D1",
-    "accent": "#F2A65A",
-    "on_accent": "#2A1B12"
+    "accent": "#3B82F6",
+    "accent_text": "#93C5FD",
+    "on_accent": "#FFFFFF",
+    "hover": "#22314D",
+    "checked": "#1E3A8A"
   }
 }
 ```
 
-Colours, brightness and sizes it leaves out come from the theme it extends. Without `extends`
-every colour is required, as in the full file below: that is the reference, a short file is the
-better start.
+Colours, sizes and brightness the file leaves out come from the theme it extends. A short file is
+the better start.
 
 ## The file
+
+Without `extends` every colour and size is required. The built-in Light is the reference:
 
 ```json
 {
   "schema": 1,
-  "name": "Sunset",
-  "dark": true,
+  "name": "Light",
+  "dark": false,
   "colours": {
-    "header": "#2A1B12",
-    "ribbon": "#35221A",
-    "tab_strip": "#2A1B12",
-    "canvas": "#1A1009",
-    "pane": "#241710",
-    "pane_header": "#35221A",
-    "border": "#5A3B2A",
-    "border_strong": "#7A5138",
-    "text": "#FFE7D1",
-    "text_dim": "#D3A985",
-    "text_disabled": "#8A6B52",
-    "icon": "#F5D3B3",
-    "hover": "#4A2F20",
-    "pressed": "#6B3F26",
-    "checked": "#5C3A24",
-    "accent": "#F2A65A",
-    "accent_text": "#FFC98B",
-    "on_accent": "#2A1B12",
-    "input": "#1F130D",
-    "input_border": "#6B4632",
-    "group_label": "#C99871",
-    "status_bar": "#20140E",
-    "selection": "#7A4A2B",
-    "menu": "#2E1D14",
-    "shadow": "#0000006E",
-    "green": "#7FC29B",
-    "red": "#EF7A6A",
-    "amber": "#F2C14E",
-    "context": "#4FB3A5",
-    "context_tint": "#1E3C39",
-    "control": "#4A3020"
+    "header": "#EEF1F5",
+    "ribbon": "#FFFFFF",
+    "tab_strip": "#EEF1F5",
+    "canvas": "#E4E8EE",
+    "pane": "#FBFCFD",
+    "pane_header": "#F3F5F8",
+    "border": "#DDE2E9",
+    "border_strong": "#C3CAD4",
+    "text": "#1F2630",
+    "text_dim": "#5E6977",
+    "text_disabled": "#A9B1BC",
+    "icon": "#3A4554",
+    "hover": "#E9F0FB",
+    "pressed": "#D4E2F8",
+    "checked": "#DCE8FA",
+    "accent": "#2563EB",
+    "accent_text": "#1D4EC4",
+    "on_accent": "#FFFFFF",
+    "input": "#FFFFFF",
+    "input_border": "#C6CDD7",
+    "group_label": "#707A88",
+    "status_bar": "#F3F5F8",
+    "selection": "#CFE0FC",
+    "menu": "#FFFFFF",
+    "shadow": "#0000001C",
+    "green": "#169A5A",
+    "red": "#D13C3C",
+    "amber": "#E59E1A",
+    "context": "#0E9384",
+    "context_tint": "#E3F5F2",
+    "control": "#DDE3EA"
   },
   "metrics": {
-    "item_spacing": [7.0, 6.0],
-    "button_padding": [10.0, 4.0],
-    "row_height": 24.0,
-    "corner_radius": 8,
-    "body": 13.0,
-    "button_text": 13.0,
-    "small": 11.0,
-    "heading": 18.0,
-    "mono": 12.5
+    "item_spacing": [6.0, 5.0],
+    "button_padding": [8.0, 3.0],
+    "row_height": 22.0,
+    "corner_radius": 5,
+    "body": 12.5,
+    "button_text": 12.5,
+    "small": 10.5,
+    "heading": 17.0,
+    "mono": 12.0
   }
 }
 ```
 
-Every colour is required unless the file extends a theme, and an unknown token stops the file from
-loading with the token named. Colours are `#RRGGBB`, or `#RRGGBBAA` where alpha matters, as in
-`shadow`. `schema` is 1; a file written for a later build is refused by number.
+An unknown token stops the file from loading, and the error names it. Colours are `#RRGGBB`, or
+`#RRGGBBAA` where alpha matters, as in `shadow`. `schema` is 1; a file written for a later build is
+refused by number.
 
 `dark` is the brightness the theme reports to egui, which sets its default widget shapes and the
 map's light or dark defaults. It is not inferred from the colours.
 
-`metrics` are in points: item spacing, button padding, row height, corner radius and text sizes,
-required unless the file extends a theme. Sizes are held to what a window can draw, and a file over
-64 KB is not read.
+`metrics` are in points: item spacing, button padding, row height, corner radius and text sizes.
+Sizes are held to what a window can draw, and a file over 64 KB is not read.
 
 ## Tokens
 

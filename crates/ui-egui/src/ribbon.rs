@@ -3440,8 +3440,7 @@ fn plugin_tab(app: &mut RustGisApp, ui: &mut Ui, plugin: &str) {
     }
 }
 
-/// The Settings tab: theme and scale, ribbon customization, language, start-up and (on the
-/// desktop) autosave.
+/// The Settings tab: theme, scale, customization, language, start-up and autosave.
 fn settings_tab(app: &mut RustGisApp, ui: &mut Ui) {
     group(ui, "Theme", |ui| {
         theme_menu(app, ui);
@@ -3503,7 +3502,6 @@ fn autosave_menu(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
-/// Settings › Theme: the built-in themes and every theme file that loads, plus the interface scale.
 fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let current = if !app.ui.theme_name.is_empty() {
         app.ui.theme_name.clone()
@@ -3544,7 +3542,6 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                     theme_action(app, "ui.themeLoad", Value::Null);
                     ui.close();
                 }
-                // After a file is added or fixed by hand: the list is read at startup otherwise.
                 if ui.add(egui::Button::selectable(false, tl!("Reload Themes"))).clicked() {
                     let _ = app.run("ui.themeReload", Value::Null);
                     ui.close();
@@ -3561,14 +3558,14 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     );
 }
 
-/// Runs a menu action, telling the user what went wrong rather than nothing happening.
+/// A failed action is notified, not swallowed.
 fn theme_action(app: &mut RustGisApp, id: &str, params: Value) {
     if let Err(e) = app.run(id, params) {
         app.session.notify(e, true);
     }
 }
 
-/// Settings › Theme › Interface Scale: the whole interface, as egui's zoom factor.
+/// Interface scale, as egui's zoom factor.
 fn scale_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let current = format!("{}%", (app.ui.interface_scale * 100.0).round() as i32);
     let label = format!("{}\n{current}", tl!("Interface Scale"));
