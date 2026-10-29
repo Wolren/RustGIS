@@ -2289,14 +2289,10 @@ impl RustGisApp {
                     save("ribbon_minimized", if self.ui.ribbon_minimized { "true" } else { "false" });
                 }
             }
+            // The theme list in Settings is the one control for brightness; this picks its entry.
             "ui.theme" => {
-                self.ui.dark = p.get("dark").and_then(Value::as_bool).unwrap_or(!self.ui.dark);
-                self.ui.dark_follows_system = false;
-                self.ui.theme_name.clear();
-                if let Some(save) = &self.services.save_pref {
-                    save("dark", if self.ui.dark { "true" } else { "false" });
-                    save("theme", "");
-                }
+                let dark = p.get("dark").and_then(Value::as_bool).unwrap_or(!self.ui.dark);
+                self.use_theme(if dark { "Dark" } else { "Light" })?;
             }
             // Picks a theme by name; no name follows the system again.
             "ui.themeFile" => {

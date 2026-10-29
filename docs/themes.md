@@ -19,8 +19,9 @@ A user file whose `name` matches a built-in replaces it. A reworked Light sits i
 
 ## Picking one
 
-Settings › Theme lists Follow the System and every theme that loaded. A choice is applied at once
-and saved for the next start. Interface scale, 80% to 200%, sits beside it.
+Settings › Theme lists Follow the System and every theme that loaded. Light and Dark are the
+brightness choices, so there is no separate Dark Mode switch. A choice is applied at once and
+saved for the next start. Interface scale, 80% to 200%, sits beside it.
 
 To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in
 the themes folder; edit that copy and the app follows it. A file that does not load is listed in
@@ -137,7 +138,7 @@ Meaning: `accent`, `accent_text`, `context`, `context_tint`, `green`, `red`, `am
 |---|---|
 | `ui.themeFile` with `name` | Uses that theme; no name follows the system again |
 | `ui.themeLoad` | Opens a theme file from anywhere, keeps it in the themes folder and uses it |
-| `ui.theme` with `dark` | Switches brightness and leaves the theme list |
+| `ui.theme` with `dark` | Uses Light or Dark, the brightness asked for |
 | `ui.scale` with `factor` | Interface scale, held between 0.75 and 2.0 |
 | `ui.themeReload` | Reads the themes folder again |
 
