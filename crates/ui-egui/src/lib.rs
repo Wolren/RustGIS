@@ -1632,22 +1632,19 @@ impl RustGisApp {
     }
 
     fn load_themes(&mut self) {
-        // The stamp before the read, so a save between the two is loaded again rather than lost.
-        self.themes_stamp = theme::Theme::folder_signature(theme::Theme::user_dir().as_deref());
-        let (themes, errors) = theme::Theme::available();
-        self.themes = themes;
-        self.theme_errors = errors;
-        self.sync_named_brightness();
-        self.drop_missing_name();
-        // Reset so a file that reads differently is applied again on the next frame.
-        self.applied_theme = None;
+        self.load_themes_from(theme::Theme::user_dir().as_deref());
     }
 
-    /// A theme that was deleted or stopped loading is not named: the button names what is drawn.
-    fn drop_missing_name(&mut self) {
-        if !self.ui.theme_name.is_empty() && !self.themes.iter().any(|t| t.name == self.ui.theme_name) {
-            self.ui.theme_name.clear();
-        }
+    /// Reads the folder; the stamp is taken first, so a save during the read is picked up next time.
+    fn load_themes_from(&mut self, dir: Option<&std::path::Path>) {
+        self.themes_stamp = theme::Theme::folder_signature(dir);
+        let (themes, errors) = theme::Theme::available_in(dir);
+        self.themes = themes;
+        self.theme_errors = errors;
+        // The choice outlives the file: a theme that stopped loading keeps its name.
+        self.sync_named_brightness();
+        // Reset so a file that reads differently is applied again on the next frame.
+        self.applied_theme = None;
     }
 
     /// A file saved as the other brightness takes the interface with it, so name and look agree.
@@ -1657,6 +1654,8 @@ impl RustGisApp {
         }
         if let Some(dark) = self.themes.iter().find(|t| t.name == self.ui.theme_name).map(|t| t.dark) {
             self.ui.dark = dark;
+            // The loaded theme owns its brightness; following the platform would overwrite it.
+            self.ui.dark_follows_system = false;
         }
     }
 
@@ -1674,23 +1673,23 @@ impl RustGisApp {
         }
     }
 
-    /// The theme in use: the one named, else the nearest built-in theme for the current brightness.
+    /// The theme drawn: the one named while it loads, else the nearest of the brightness in force.
+    fn drawn(&self) -> Option<&theme::Theme> {
+        self.themes.iter().find(|t| t.name == self.ui.theme_name).or_else(|| self.themes.iter().find(|t| t.dark == self.ui.dark))
+    }
+
+    /// The theme in use: the one named, else the nearest built-in for the current brightness.
     pub fn current_theme(&self) -> theme::Theme {
-        self.themes
-            .iter()
-            .find(|t| t.name == self.ui.theme_name && t.dark == self.ui.dark)
-            .or_else(|| self.themes.iter().find(|t| t.dark == self.ui.dark))
-            .cloned()
-            .unwrap_or_else(|| {
-                let builtin = theme::Theme::builtin();
-                let wanted = builtin.iter().find(|t| t.dark == self.ui.dark).or_else(|| builtin.first());
-                wanted.cloned().unwrap_or(theme::Theme {
-                    name: "Light".to_string(),
-                    dark: false,
-                    tokens: theme::Tokens::light(),
-                    metrics: theme::Metrics::standard(),
-                })
+        self.drawn().cloned().unwrap_or_else(|| {
+            let builtin = theme::Theme::builtin();
+            let wanted = builtin.iter().find(|t| t.dark == self.ui.dark).or_else(|| builtin.first());
+            wanted.cloned().unwrap_or(theme::Theme {
+                name: "Light".to_string(),
+                dark: false,
+                tokens: theme::Tokens::light(),
+                metrics: theme::Metrics::standard(),
             })
+        })
     }
 
     /// A saved theme name wins; one that no longer loads follows the system.
@@ -1699,15 +1698,19 @@ impl RustGisApp {
             app.services.load_pref.as_ref().and_then(|load| load(key)).filter(|v| !v.is_empty())
         };
         let wanted = pref(self, "theme");
-        let picked = wanted.and_then(|name| self.themes.iter().find(|t| t.name == name).cloned());
+        let picked = wanted.as_ref().and_then(|name| self.themes.iter().find(|t| t.name == *name).cloned());
         if let Some(picked) = picked {
             self.ui.theme_name = picked.name;
             self.ui.dark = picked.dark;
             self.ui.dark_follows_system = false;
-        } else if let Some(dark) = pref(self, "dark") {
-            // "auto" was Follow the System; a toggle stores the brightness it left.
-            self.ui.dark = dark == "true";
-            self.ui.dark_follows_system = dark == "auto";
+        } else {
+            // A saved theme keeps its name until its file loads, so a fixed file is drawn again.
+            self.ui.theme_name = wanted.unwrap_or_default();
+            if let Some(dark) = pref(self, "dark") {
+                // "auto" was Follow the System; a toggle stores the brightness it left.
+                self.ui.dark = dark == "true";
+                self.ui.dark_follows_system = dark == "auto";
+            }
         }
         let scale = pref(self, "ui_scale").and_then(|v| v.parse::<f32>().ok());
         self.ui.interface_scale = scale.map_or(1.0, theme::clamp_scale);
@@ -4207,14 +4210,14 @@ impl RustGisApp {
         }
     }
 
-    /// The entry the Theme button names. A platform that reports no theme cannot be followed, so
-    /// the brightness in force is named instead. winit reports no system theme on Linux.
+    /// The Theme button's entry: the drawn name, or Follow the System where the platform reports one.
     pub fn theme_shown(&self, system_reports: bool) -> (bool, String) {
         let follows = self.ui.theme_name.is_empty() && self.ui.dark_follows_system && system_reports;
-        let name = if !self.ui.theme_name.is_empty() {
-            self.ui.theme_name.clone()
-        } else if follows {
+        let name = if follows {
             tl!("Follow the System").to_string()
+        } else if let Some(drawn) = self.drawn() {
+            // The drawn theme is named: a file that stopped loading is not.
+            drawn.name.clone()
         } else if self.ui.dark {
             tl!("Dark").to_string()
         } else {
@@ -4856,24 +4859,57 @@ mod look_tests {
     }
 
     #[test]
-    fn a_theme_that_stopped_loading_is_not_named() {
+    fn a_choice_outlives_a_file_that_stops_loading() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let path = dir.path().join("cobalt.json");
+        let mut cobalt = builtin(true);
+        cobalt.name = "Cobalt".to_string();
+        let good = cobalt.to_json().expect("json");
+        std::fs::write(&path, &good).expect("the file");
         let mut app = app_with(&[]);
-        app.themes = vec![builtin(false), builtin(true)];
-        app.ui.theme_name = "Gone".to_string();
-        app.drop_missing_name();
-        assert!(app.ui.theme_name.is_empty(), "the name is dropped");
-        assert_eq!(app.current_theme().name, "Light", "and the button names the theme that is drawn");
+        app.load_themes_from(Some(dir.path()));
+        app.use_theme("Cobalt").expect("the file loads");
+        assert_eq!(app.theme_shown(true).1, "Cobalt");
+        // A save that does not parse: the folder drops the theme, the choice stays.
+        std::fs::write(&path, "{\"schema\": 1, ").expect("the broken file");
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(app.ui.theme_name, "Cobalt", "the choice outlives the file");
+        assert_eq!(app.current_theme().name, "Dark", "the nearest theme is drawn");
+        assert_eq!(app.theme_shown(true).1, "Dark", "and the button names it");
+        // The typo is fixed: the choice is drawn again without picking it again.
+        std::fs::write(&path, &good).expect("the file");
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(app.current_theme().name, "Cobalt", "the choice is restored");
+        assert_eq!(app.theme_shown(true).1, "Cobalt");
+    }
+
+    #[test]
+    fn a_live_edit_that_changes_the_brightness_is_followed() {
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let path = dir.path().join("cobalt.json");
+        let mut cobalt = builtin(true);
+        cobalt.name = "Cobalt".to_string();
+        std::fs::write(&path, cobalt.to_json().expect("json")).expect("the file");
+        let mut app = app_with(&[]);
+        app.load_themes_from(Some(dir.path()));
+        app.use_theme("Cobalt").expect("the file loads");
+        // The same file saved as a light theme: the interface takes its brightness with it.
+        cobalt.dark = false;
+        cobalt.tokens = theme::Tokens::light();
+        std::fs::write(&path, cobalt.to_json().expect("json")).expect("the file");
+        app.load_themes_from(Some(dir.path()));
+        assert!(!app.ui.dark, "the interface takes the brightness of the theme it names");
+        assert_eq!(app.current_theme().name, "Cobalt", "the named theme is drawn");
+        assert_eq!(app.theme_shown(true).1, "Cobalt");
     }
 
     #[test]
     fn the_fallback_takes_the_brightness_asked_for() {
         let mut app = app_with(&[]);
-        // A folder theme that calls itself Dark while it is light: nothing loaded matches dark.
-        let mut lied = builtin(false);
-        lied.name = "Dark".to_string();
-        app.themes = vec![lied];
+        // Only a light theme loads and the interface asks for dark: the built-in dark is drawn.
+        app.themes = vec![builtin(false)];
         app.ui.dark = true;
-        app.ui.theme_name = "Dark".to_string();
+        app.ui.theme_name = "Gone".to_string();
         assert!(app.current_theme().dark, "the drawn theme is a dark one, as asked");
     }
 
@@ -4934,10 +4970,18 @@ mod look_tests {
     fn a_saved_theme_that_is_gone_leaves_the_saved_brightness() {
         let mut app = app_with(&[("theme", "Deleted"), ("dark", "true")]);
         app.take_saved_look();
-        assert!(app.ui.theme_name.is_empty(), "no theme file is named");
+        assert_eq!(app.ui.theme_name, "Deleted", "the choice waits for a file of that name");
         assert!(app.ui.dark, "Dark Mode was on when it was last closed");
         assert!(!app.ui.dark_follows_system);
+        assert_eq!(app.theme_shown(true).1, "Dark", "the button names the theme drawn");
         assert_eq!(app.ui.interface_scale, 1.0, "no scale saved is the normal one");
+        // The file appears later: the saved choice is drawn without picking it again.
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let mut saved = builtin(false);
+        saved.name = "Deleted".to_string();
+        std::fs::write(dir.path().join("deleted.json"), saved.to_json().expect("json")).expect("the file");
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(app.current_theme().name, "Deleted", "the saved choice is restored");
     }
 
     fn builtin(dark: bool) -> theme::Theme {

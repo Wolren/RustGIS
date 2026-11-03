@@ -15,7 +15,8 @@ The config folder is `%APPDATA%\RustGIS` on Windows, `~/Library/Application Supp
 macOS and `$XDG_CONFIG_HOME/rustgis` elsewhere. `RUSTGIS_CONFIG_DIR` overrides it.
 
 A user file whose `name` matches a built-in replaces it. A reworked Light sits in the folder as
-`light.json`, and the menu lists one Light.
+`light.json`, and the menu lists one Light. Two files that claim the same name: the first in name
+order is used, and the second is listed in red.
 
 ## Picking one
 
@@ -37,13 +38,14 @@ differs.
 
 To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in the
 themes folder; edit that copy and the app follows it. Loading a file whose `name` matches a theme
-already in the folder replaces that copy, and the copy it replaces is kept beside it as
-`<file>.json.bak`. A file that does not load is listed in red at the bottom of the same menu, with
-the token at fault.
+already in the folder replaces that copy, and the version it replaces is kept beside it as
+`<file>.json.bak`: one backup, replaced on each save. A file that does not load is listed in red at
+the bottom of the same menu, with the token at fault.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
 folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in
-until it loads again, and the menu gives the reason.
+until it loads again: the button names the theme drawn, the menu gives the reason, and the choice
+returns with the file.
 
 ## A short theme
 

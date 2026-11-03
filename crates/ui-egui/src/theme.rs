@@ -487,15 +487,26 @@ impl Theme {
         };
         let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| is_theme_file(p)).collect();
         files.sort();
+        // A name set by one file cannot be set by another: the second is reported, not silently lost.
+        let mut claimed: BTreeMap<String, PathBuf> = BTreeMap::new();
         for path in files {
             let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
             match read_text(&path) {
                 Ok(text) => match Theme::parse(&stem, &text) {
-                    // A user file named as a built-in replaces it, so a name picks one theme.
-                    Ok(theme) => match themes.iter_mut().find(|t| t.name == theme.name) {
-                        Some(replaced) => *replaced = theme,
-                        None => themes.push(theme),
-                    },
+                    Ok(theme) => {
+                        if let Some(first) = claimed.get(&theme.name) {
+                            let other = first.display().to_string();
+                            let reason = i18n::fmt("{name} is already set by {path}", &[("name", theme.name.as_str()), ("path", &other)]);
+                            errors.push(why(&path, &reason));
+                            continue;
+                        }
+                        claimed.insert(theme.name.clone(), path.clone());
+                        // A user file named as a built-in replaces it, so a name picks one theme.
+                        match themes.iter_mut().find(|t| t.name == theme.name) {
+                            Some(replaced) => *replaced = theme,
+                            None => themes.push(theme),
+                        }
+                    }
                     Err(e) => errors.push(why(&path, &e)),
                 },
                 Err(Over::TooBig) => errors.push(too_big(&path)),
@@ -634,7 +645,7 @@ fn clean_name(name: &str) -> String {
     if kept.is_empty() { "Theme".to_string() } else { kept.to_string() }
 }
 
-/// Keeps the file it replaces beside it as `<name>.json.bak`: a folder copy may hold edits.
+/// The file it replaces is kept as `<file>.json.bak`: one backup, replaced on each save.
 fn backup_before_replace(path: &std::path::Path, text: &str) -> Result<(), String> {
     // The same bound as any other read: a file over the limit is left alone, not loaded whole.
     let Ok(old) = read_text(path) else { return Ok(()) };
@@ -1039,6 +1050,17 @@ mod tests {
         assert!(theme.dark && theme.tokens.dark, "the theme reports dark");
         assert!(ctx.global_style().visuals.dark_mode, "so egui draws the parts the file does not colour in dark mode");
         assert_eq!(theme.tokens.pane, Theme::builtin()[0].tokens.pane, "and the colours it extends stay");
+    }
+
+    #[test]
+    fn a_name_two_files_claim_is_reported_once() {
+        let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
+        let dir = theme_folder("rustgis-theme-duplicate-test", &[("a.json", &mine), ("b.json", &mine)]);
+        let (found, errors) = Theme::available_in(Some(&dir));
+        assert_eq!(found.iter().filter(|t| t.name == "Mine").count(), 1, "one Mine is offered");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("already set by"), "{errors:?}");
+        assert!(errors[0].contains("a.json"), "the error names the file that holds it: {errors:?}");
     }
 
     #[test]
