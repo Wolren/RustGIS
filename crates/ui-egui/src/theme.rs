@@ -570,6 +570,17 @@ impl Theme {
     /// The file that holds this theme: its own name, or the next free one when another theme took it.
     fn save_path(&self, dir: &std::path::Path) -> Result<PathBuf, String> {
         let stem = stem_of(&self.name);
+        // A file that already holds this name is replaced, even under another stem: one name, one file.
+        if let Ok(read) = std::fs::read_dir(dir) {
+            let mut held: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| is_theme_file(p)).collect();
+            held.sort();
+            for path in held {
+                let Ok(text) = read_text(&path) else { continue };
+                if Theme::parse(&stem, &text).is_ok_and(|found| found.name == self.name) {
+                    return Ok(path);
+                }
+            }
+        }
         for at in 1..=99 {
             let name = if at == 1 { format!("{stem}.json") } else { format!("{stem}-{at}.json") };
             let path = dir.join(name);
@@ -1090,6 +1101,19 @@ mod tests {
             std::fs::write(dir.path().join(file), text).expect("the file");
         }
         dir
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_that_holds_the_name() {
+        let held = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
+        let dir = theme_folder(&[("ocean.json", held.as_str())]);
+        let mut mine = light();
+        mine.name = "Mine".to_string();
+        let path = mine.save_path(dir.path()).expect("a file for the name");
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("ocean.json"), "the name owns the file it was found in");
+        let other = theme_folder(&[("ocean.json", light().to_json().expect("json").as_str())]);
+        let path = mine.save_path(other.path()).expect("a free file");
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("mine.json"), "another name keeps its own file");
     }
 
     #[test]

@@ -1771,6 +1771,10 @@ impl RustGisApp {
         };
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
         let theme = theme::Theme::parse(&stem, &text).map_err(|e| said(&e))?;
+        // The picker says what the reader changed; the saved copy is clamped, so the folder is silent.
+        for note in &theme.notes {
+            self.session.notify(note.clone(), false);
+        }
         let kept = theme.save_user()?;
         self.load_themes();
         self.use_theme(&theme.name)?;
