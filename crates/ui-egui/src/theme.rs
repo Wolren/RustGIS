@@ -576,7 +576,8 @@ impl Theme {
             held.sort();
             for path in held {
                 let Ok(text) = read_text(&path) else { continue };
-                if Theme::parse(&stem, &text).is_ok_and(|found| found.name == self.name) {
+                let own = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                if Theme::parse(&own, &text).is_ok_and(|found| found.name == self.name) {
                     return Ok(path);
                 }
             }
