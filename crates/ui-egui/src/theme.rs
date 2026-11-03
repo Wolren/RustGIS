@@ -368,6 +368,8 @@ pub struct Theme {
 #[serde(deny_unknown_fields)]
 struct Raw {
     schema: u32,
+    /// A file with no name takes the name of its file, as one with an empty name does.
+    #[serde(default)]
     name: String,
     /// A theme that ships, whose colours and sizes this file starts from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -985,6 +987,14 @@ mod tests {
         let text = r#"{"schema": 1, "name": "Mine", "extends": "Gone"}"#;
         let err = Theme::parse("mine", text).expect_err("no theme called Gone ships");
         assert!(err.contains("extends Gone"), "{err}");
+    }
+
+    #[test]
+    fn a_file_without_a_name_takes_its_file_name() {
+        let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
+        json.as_object_mut().expect("an object").remove("name");
+        let theme = Theme::parse("ocean", &json.to_string()).expect("a file with no name loads");
+        assert_eq!(theme.name, "ocean", "the file name stands in");
     }
 
     #[test]

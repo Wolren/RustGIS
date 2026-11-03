@@ -12,7 +12,8 @@ drawn by the renderer, which takes its light or dark defaults from the theme's `
 | User | `<config>/themes/*.json`, read at startup, when a file changes, and by Reload Themes |
 
 The config folder is `%APPDATA%\RustGIS` on Windows, `~/Library/Application Support/RustGIS` on
-macOS and `$XDG_CONFIG_HOME/rustgis` elsewhere. `RUSTGIS_CONFIG_DIR` overrides it.
+macOS and `$XDG_CONFIG_HOME/rustgis`, which is `~/.config/rustgis` when the variable is unset,
+elsewhere. `RUSTGIS_CONFIG_DIR` overrides it.
 
 A user file whose `name` matches a built-in replaces it. A reworked Light sits in the folder as
 `light.json`, and the menu lists one Light. Two files that claim the same name: the first in name
