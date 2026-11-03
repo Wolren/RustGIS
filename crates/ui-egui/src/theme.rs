@@ -549,7 +549,8 @@ impl Theme {
             .filter(|e| is_theme_file(&e.path()))
             .filter_map(|e| {
                 let path = e.path();
-                let meta = e.metadata().ok()?;
+                // std::fs::metadata follows a symlink, as read_text does; DirEntry::metadata does not.
+                let meta = std::fs::metadata(&path).ok()?;
                 // Metadata carries a std clock; this runs only where a themes folder exists.
                 let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
                 Some((path.file_name()?.to_string_lossy().into_owned(), meta.len(), saved))
@@ -981,6 +982,19 @@ mod tests {
         std::fs::write(dir.path().join("mine.json"), "{\"schema\": 1}").expect("the file");
         assert_ne!(Theme::folder_signature(Some(dir.path())), before, "a saved file is noticed");
         assert_eq!(Theme::folder_signature(None), 0, "no folder never changes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_signature_follows_a_symlinked_theme() {
+        let dir = theme_folder(&[]);
+        let target = dir.path().join("real.json");
+        std::fs::write(&target, "{}").expect("the file");
+        std::os::unix::fs::symlink(&target, dir.path().join("link.json")).expect("the link");
+        let before = Theme::folder_signature(Some(dir.path()));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&target).expect("the target").set_modified(later).expect("touch");
+        assert_ne!(Theme::folder_signature(Some(dir.path())), before, "the target is what read_text reads");
     }
 
     #[test]
