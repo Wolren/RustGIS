@@ -295,7 +295,7 @@ impl MetricsFile {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Metrics {
     pub item_spacing: [f32; 2],
@@ -324,11 +324,11 @@ impl Metrics {
         }
     }
 
-    /// Held to what a window draws; a value that is not a number takes the standard.
-    pub fn clamped(self) -> Self {
+    /// Held to what a window draws, and how many values it had to hold.
+    pub fn clamped(self) -> (Self, usize) {
         let fit = |v: f32, lo: f32, hi: f32, otherwise: f32| if v.is_finite() { v.clamp(lo, hi) } else { otherwise };
         let std = Metrics::standard();
-        Metrics {
+        let metrics = Metrics {
             item_spacing: [
                 fit(self.item_spacing[0], 0.0, 40.0, std.item_spacing[0]),
                 fit(self.item_spacing[1], 0.0, 40.0, std.item_spacing[1]),
@@ -344,7 +344,8 @@ impl Metrics {
             small: fit(self.small, 5.0, 32.0, std.small),
             heading: fit(self.heading, 8.0, 60.0, std.heading),
             mono: fit(self.mono, 5.0, 40.0, std.mono),
-        }
+        };
+        (metrics, held_count(self, metrics))
     }
 }
 
@@ -359,6 +360,8 @@ pub struct Theme {
     pub dark: bool,
     pub tokens: Tokens,
     pub metrics: Metrics,
+    /// What the reader changed to make the file load, said once where it is read.
+    pub notes: Vec<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -388,6 +391,7 @@ impl Theme {
                     dark: fallback.dark,
                     tokens: fallback,
                     metrics: Metrics::standard(),
+                    notes: Vec::new(),
                 })
             })
             .collect()
@@ -398,7 +402,8 @@ impl Theme {
         // Notepad saves UTF-8 with a byte-order mark, which serde refuses at the first byte.
         let text = text.trim_start_matches('\u{feff}');
         let raw: Raw = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let name = clean_name(if raw.name.trim().is_empty() { fallback_name } else { raw.name.trim() });
+        let mut notes = Vec::new();
+        let name = clean_name(if raw.name.trim().is_empty() { fallback_name } else { raw.name.trim() }, &mut notes);
         if raw.schema != SCHEMA {
             return Err(i18n::fmt(
                 "{name}: theme schema {found} is not {schema}",
@@ -436,6 +441,7 @@ impl Theme {
             dark: raw.dark.unwrap_or(false),
             tokens: if raw.dark.unwrap_or(false) { Tokens::dark() } else { Tokens::light() },
             metrics: Metrics::standard(),
+            notes: Vec::new(),
         });
         let mut tokens = fallback.tokens;
         for (key, value) in &raw.colours {
@@ -452,8 +458,11 @@ impl Theme {
         if let Some(file) = raw.metrics {
             file.apply_to(&mut metrics);
         }
-        let metrics = metrics.clamped();
-        Ok(Theme { name, dark, tokens, metrics })
+        let (metrics, held) = metrics.clamped();
+        if held > 0 {
+            notes.push(held_note(&name, held));
+        }
+        Ok(Theme { name, dark, tokens, metrics, notes })
     }
 
     pub fn to_json(&self) -> Result<String, String> {
@@ -482,10 +491,24 @@ impl Theme {
         let Some(dir) = dir else {
             return (themes, errors);
         };
-        let Ok(read) = std::fs::read_dir(dir) else {
-            return (themes, errors);
+        let read = match std::fs::read_dir(dir) {
+            Ok(read) => read,
+            // A folder that does not exist yet is normal; one that cannot be read is reported.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (themes, errors),
+            Err(e) => {
+                errors.push(why(dir, &e.to_string()));
+                return (themes, errors);
+            }
         };
-        let mut files: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| is_theme_file(p)).collect();
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in read {
+            match entry {
+                Ok(e) if is_theme_file(&e.path()) => files.push(e.path()),
+                Ok(_) => {}
+                // An entry the folder cannot name is reported, not dropped.
+                Err(e) => errors.push(why(dir, &e.to_string())),
+            }
+        }
         files.sort();
         // A name set by one file cannot be set by another: the second is reported, not silently lost.
         let mut claimed: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -549,15 +572,15 @@ impl Theme {
         for at in 1..=99 {
             let name = if at == 1 { format!("{stem}.json") } else { format!("{stem}-{at}.json") };
             let path = dir.join(name);
-            match read_text(&path) {
-                Ok(text) => {
-                    if Theme::parse(&stem, &text).is_ok_and(|found| found.name == self.name) {
-                        return Ok(path);
-                    }
-                }
-                // A file of another theme, or one too big to be read, is left alone.
-                Err(Over::TooBig) => {}
-                Err(Over::Reason(_)) => return Ok(path),
+            // A name no file holds is free; one that is there is read, and skipped if it is another theme.
+            if std::fs::symlink_metadata(&path).is_err() {
+                return Ok(path);
+            }
+            // A file that cannot be read, or is too big, is left alone: the next name is used.
+            if let Ok(text) = read_text(&path)
+                && Theme::parse(&stem, &text).is_ok_and(|found| found.name == self.name)
+            {
+                return Ok(path);
             }
         }
         Err(why(dir, &i18n::fmt("no free file name for {name}", &[("name", &self.name)])))
@@ -613,6 +636,15 @@ fn slot<'a>(t: &'a mut Tokens, name: &str) -> Option<&'a mut Color32> {
     })
 }
 
+/// The name the interface shows: a built-in theme in the current language, a user name as written.
+pub fn label(name: &str) -> String {
+    match name {
+        "Light" => tl!("Light").to_string(),
+        "Dark" => tl!("Dark").to_string(),
+        _ => name.to_string(),
+    }
+}
+
 pub fn colour(theme: &Theme, name: &str) -> Color32 {
     let mut tokens = theme.tokens;
     slot(&mut tokens, name).map_or(Color32::TRANSPARENT, |c| *c)
@@ -638,11 +670,57 @@ pub fn contrast(a: Color32, b: Color32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// A name as the menu shows it: one line, no control characters, and at most [`MAX_NAME`] long.
-fn clean_name(name: &str) -> String {
-    let kept: String = name.trim().chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
+/// A name as the menu shows it, with a note for everything it had to drop or cut.
+fn clean_name(name: &str, notes: &mut Vec<String>) -> String {
+    let trimmed = name.trim();
+    let printable = trimmed.chars().filter(|c| !c.is_control()).count();
+    let controls = trimmed.chars().count() - printable;
+    let kept: String = trimmed.chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
     let kept = kept.trim();
-    if kept.is_empty() { "Theme".to_string() } else { kept.to_string() }
+    if kept.is_empty() {
+        return "Theme".to_string();
+    }
+    if controls > 0 {
+        notes.push(if controls == 1 {
+            i18n::fmt("{name}: 1 control character was dropped from the name", &[("name", kept)])
+        } else {
+            i18n::fmt("{name}: {n} control characters were dropped from the name", &[("name", kept), ("n", &controls.to_string())])
+        });
+    }
+    if printable > MAX_NAME {
+        notes.push(i18n::fmt(
+            "{name}: the name was longer than {limit} characters, so it was cut",
+            &[("name", kept), ("limit", &MAX_NAME.to_string())],
+        ));
+    }
+    kept.to_string()
+}
+
+/// How many sizes the window had to hold to fit.
+fn held_count(before: Metrics, after: Metrics) -> usize {
+    let pairs = [
+        (before.item_spacing[0], after.item_spacing[0]),
+        (before.item_spacing[1], after.item_spacing[1]),
+        (before.button_padding[0], after.button_padding[0]),
+        (before.button_padding[1], after.button_padding[1]),
+        (before.row_height, after.row_height),
+        (before.body, after.body),
+        (before.button_text, after.button_text),
+        (before.small, after.small),
+        (before.heading, after.heading),
+        (before.mono, after.mono),
+    ];
+    let sizes = pairs.iter().filter(|(a, b)| a != b).count();
+    sizes + usize::from(before.corner_radius != after.corner_radius)
+}
+
+/// One line for the sizes the window had to hold, in the singular when there is one.
+fn held_note(name: &str, held: usize) -> String {
+    if held == 1 {
+        i18n::fmt("{name}: 1 size was held to what the window draws", &[("name", name)])
+    } else {
+        i18n::fmt("{name}: {n} sizes were held to what the window draws", &[("name", name), ("n", &held.to_string())])
+    }
 }
 
 /// The file it replaces is kept as `<file>.json.bak`: one backup, replaced on each save.
@@ -844,6 +922,17 @@ mod tests {
     }
 
     #[test]
+    fn the_guide_example_is_the_shipped_light_theme() {
+        let guide = include_str!("../../../docs/themes.md");
+        let after = guide.split("The built-in Light is the reference:").nth(1).expect("the guide names its reference");
+        let block = after.split("```json").nth(1).expect("a json block follows it");
+        let block = block.split("```").next().expect("the block ends");
+        let parsed = Theme::parse("Light", block).expect("the guide's example loads");
+        let shipped = Theme::builtin().into_iter().find(|t| t.name == "Light").expect("Light ships");
+        assert_eq!(parsed, shipped, "the guide's example is the shipped Light theme");
+    }
+
+    #[test]
     fn every_built_in_theme_reads_its_text_on_its_surfaces() {
         for theme in Theme::builtin() {
             let ratio = contrast(theme.tokens.text, theme.tokens.pane);
@@ -879,10 +968,10 @@ mod tests {
 
     #[test]
     fn the_folder_signature_follows_a_saved_file() {
-        let dir = theme_folder("rustgis-theme-signature-test", &[("mine.json", "{}")]);
-        let before = Theme::folder_signature(Some(&dir));
-        std::fs::write(dir.join("mine.json"), "{\"schema\": 1}").expect("the file");
-        assert_ne!(Theme::folder_signature(Some(&dir)), before, "a saved file is noticed");
+        let dir = theme_folder(&[("mine.json", "{}")]);
+        let before = Theme::folder_signature(Some(dir.path()));
+        std::fs::write(dir.path().join("mine.json"), "{\"schema\": 1}").expect("the file");
+        assert_ne!(Theme::folder_signature(Some(dir.path())), before, "a saved file is noticed");
         assert_eq!(Theme::folder_signature(None), 0, "no folder never changes");
     }
 
@@ -973,12 +1062,10 @@ mod tests {
         }
     }
 
-    fn theme_folder(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("the folder");
+    fn theme_folder(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary folder");
         for (file, text) in files {
-            std::fs::write(dir.join(file), text).expect("the file");
+            std::fs::write(dir.path().join(file), text).expect("the file");
         }
         dir
     }
@@ -986,8 +1073,8 @@ mod tests {
     #[test]
     fn a_theme_in_the_user_folder_is_offered() {
         let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
-        let dir = theme_folder("rustgis-theme-folder-test", &[("mine.json", &mine)]);
-        let (found, errors) = Theme::available_in(Some(&dir));
+        let dir = theme_folder(&[("mine.json", &mine)]);
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert!(errors.is_empty(), "{errors:?}");
         assert!(found.iter().any(|t| t.name == "Mine"), "the folder theme is offered");
         assert!(found.iter().any(|t| t.name == "Light"), "the built-in themes stay");
@@ -996,8 +1083,8 @@ mod tests {
     #[test]
     fn a_broken_file_is_reported_and_the_others_load() {
         let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
-        let dir = theme_folder("rustgis-theme-broken-test", &[("mine.json", &mine), ("half.json", "{\"schema\": 1}")]);
-        let (found, errors) = Theme::available_in(Some(&dir));
+        let dir = theme_folder(&[("mine.json", &mine), ("half.json", "{\"schema\": 1}")]);
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("half.json"), "{errors:?}");
         assert!(found.iter().any(|t| t.name == "Mine"), "the good file still loads");
@@ -1007,8 +1094,8 @@ mod tests {
     fn a_user_theme_replaces_the_built_in_of_the_same_name() {
         let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
         json["colours"]["accent"] = "#123456".into();
-        let dir = theme_folder("rustgis-theme-replace-test", &[("light.json", &json.to_string())]);
-        let (found, errors) = Theme::available_in(Some(&dir));
+        let dir = theme_folder(&[("light.json", &json.to_string())]);
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(found.iter().filter(|t| t.name == "Light").count(), 1, "one Light is offered");
         let light = found.iter().find(|t| t.name == "Light").expect("Light is offered");
@@ -1055,8 +1142,8 @@ mod tests {
     #[test]
     fn a_name_two_files_claim_is_reported_once() {
         let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
-        let dir = theme_folder("rustgis-theme-duplicate-test", &[("a.json", &mine), ("b.json", &mine)]);
-        let (found, errors) = Theme::available_in(Some(&dir));
+        let dir = theme_folder(&[("a.json", &mine), ("b.json", &mine)]);
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert_eq!(found.iter().filter(|t| t.name == "Mine").count(), 1, "one Mine is offered");
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("already set by"), "{errors:?}");
@@ -1070,6 +1157,20 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_cannot_be_read_keeps_its_name() {
+        let dir = theme_folder(&[]);
+        let taken = dir.path().join("mine.json");
+        // A UTF-16 file from Notepad: not UTF-8, so the reader refuses it.
+        std::fs::write(&taken, [0xFF, 0xFE, 0x7B, 0x00]).expect("the file");
+        let mut mine = light();
+        mine.name = "Mine".to_string();
+        let path = mine.save_path(dir.path()).expect("another free name");
+        assert_ne!(path, taken, "the unreadable file is not replaced");
+        assert_eq!(path.file_name().expect("a name"), "mine-2.json");
+        assert_eq!(std::fs::read(&taken).expect("the file"), vec![0xFF, 0xFE, 0x7B, 0x00], "its bytes are untouched");
+    }
+
+    #[test]
     fn a_replaced_theme_file_keeps_the_copy_it_replaced() {
         let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
         json["name"] = "Mine".into();
@@ -1077,36 +1178,36 @@ mod tests {
         let edited = json.to_string();
         json["colours"]["accent"] = "#654321".into();
         let picked = json.to_string();
-        let dir = theme_folder("rustgis-theme-backup-test", &[("mine.json", &edited)]);
-        let path = dir.join("mine.json");
+        let dir = theme_folder(&[("mine.json", &edited)]);
+        let path = dir.path().join("mine.json");
         backup_before_replace(&path, &picked).expect("the backup");
-        assert_eq!(std::fs::read_to_string(dir.join("mine.json.bak")).expect("the backup file"), edited);
+        assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("the backup file"), edited);
         assert_eq!(std::fs::read_to_string(&path).expect("the file"), edited, "the file is not touched yet");
         // The folder loads one Mine, and the backup is not a theme.
         std::fs::write(&path, &picked).expect("the file");
-        let (found, errors) = Theme::available_in(Some(&dir));
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(found.iter().filter(|t| t.name == "Mine").count(), 1, "one Mine is offered");
         assert!(!found.iter().any(|t| t.name.contains("bak")), "the backup is not a theme");
         // Writing the same text again leaves the backup alone.
         backup_before_replace(&path, &picked).expect("no backup needed");
-        assert_eq!(std::fs::read_to_string(dir.join("mine.json.bak")).expect("the backup file"), edited);
+        assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("the backup file"), edited);
     }
 
     #[test]
     fn two_names_that_share_a_stem_keep_two_files() {
-        let dir = theme_folder("rustgis-theme-stem-test", &[]);
+        let dir = theme_folder(&[]);
         let mut first = light();
         first.name = "Cobalt Blue".to_string();
-        let first_at = first.save_path(&dir).expect("a free name");
+        let first_at = first.save_path(dir.path()).expect("a free name");
         std::fs::write(&first_at, first.to_json().expect("json")).expect("the file");
         let mut second = light();
         second.name = "Cobalt-Blue".to_string();
-        let second_at = second.save_path(&dir).expect("another free name");
+        let second_at = second.save_path(dir.path()).expect("another free name");
         std::fs::write(&second_at, second.to_json().expect("json")).expect("the file");
         assert_ne!(first_at, second_at, "two themes that share a stem keep two files");
-        assert_eq!(first.save_path(&dir).expect("its own file"), first_at, "a theme finds the file that holds it");
-        let (found, errors) = Theme::available_in(Some(&dir));
+        assert_eq!(first.save_path(dir.path()).expect("its own file"), first_at, "a theme finds the file that holds it");
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(found.iter().filter(|t| t.name.starts_with("Cobalt")).count(), 2, "both load");
     }
@@ -1114,16 +1215,16 @@ mod tests {
     #[test]
     fn a_theme_file_with_an_upper_case_extension_is_read() {
         let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
-        let dir = theme_folder("rustgis-theme-upper-test", &[("MINE.JSON", &mine)]);
-        let (found, errors) = Theme::available_in(Some(&dir));
+        let dir = theme_folder(&[("MINE.JSON", &mine)]);
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert!(errors.is_empty(), "{errors:?}");
         assert!(found.iter().any(|t| t.name == "Mine"), "the file is read whatever the case of its extension");
     }
 
     #[test]
     fn only_a_plain_file_is_opened() {
-        let dir = theme_folder("rustgis-theme-dir-test", &[]);
-        match read_text(&dir) {
+        let dir = theme_folder(&[]);
+        match read_text(dir.path()) {
             Err(Over::Reason(why)) => assert!(why.contains("not a file"), "{why}"),
             other => panic!("{other:?}"),
         }
@@ -1137,8 +1238,8 @@ mod tests {
 
     #[test]
     fn a_file_over_the_limit_reports_the_limit_not_the_encoding() {
-        let dir = theme_folder("rustgis-theme-multibyte-test", &[]);
-        let path = dir.join("wide.json");
+        let dir = theme_folder(&[]);
+        let path = dir.path().join("wide.json");
         // Two bytes each, so the cut lands inside a character.
         std::fs::write(&path, "ą".repeat(MAX_THEME_BYTES as usize / 2 + 1)).expect("the file");
         assert!(matches!(read_text(&path), Err(Over::TooBig)), "the size is reported, not the encoding");
@@ -1146,8 +1247,8 @@ mod tests {
 
     #[test]
     fn a_theme_file_over_the_limit_is_not_read() {
-        let dir = theme_folder("rustgis-theme-over-limit", &[]);
-        let path = dir.join("big.json");
+        let dir = theme_folder(&[]);
+        let path = dir.path().join("big.json");
         std::fs::write(&path, "x".repeat(MAX_THEME_BYTES as usize + 1)).expect("the file");
         assert!(matches!(read_text(&path), Err(Over::TooBig)), "a file over the limit is refused as it is read");
     }
@@ -1165,6 +1266,14 @@ mod tests {
         assert_eq!(theme.metrics.corner_radius, 32);
         assert_eq!(theme.metrics.item_spacing, [40.0, 0.0]);
         assert_eq!(theme.metrics.heading, 17.0, "what the file does not set stays standard");
+        assert_eq!(theme.notes.len(), 1, "{:?}", theme.notes);
+        assert!(theme.notes[0].contains("5 sizes"), "every held value is counted: {:?}", theme.notes);
+    }
+
+    #[test]
+    fn a_clean_file_says_nothing() {
+        let clean = Theme::parse("Mine", r#"{"schema": 1, "name": "Mine", "extends": "Light"}"#).expect("it parses");
+        assert!(clean.notes.is_empty(), "{:?}", clean.notes);
     }
 
     #[test]
@@ -1193,12 +1302,21 @@ mod tests {
     }
 
     #[test]
+    fn a_built_in_name_is_shown_in_the_language() {
+        crate::i18n::set_current(crate::i18n::Lang::from_code("de").expect("a German catalog"));
+        assert_eq!(label("Light"), "Hell");
+        assert_eq!(label("Dark"), "Dunkel");
+        assert_eq!(label("Cobalt"), "Cobalt", "a user name is shown as written");
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+    }
+
+    #[test]
     fn a_file_too_large_to_be_a_theme_is_reported_not_read() {
         let mine = light().to_json().expect("json").replace("\"Light\"", "\"Mine\"");
-        let dir = theme_folder("rustgis-theme-large-test", &[("mine.json", &mine)]);
+        let dir = theme_folder(&[("mine.json", &mine)]);
         let huge = "x".repeat(MAX_THEME_BYTES as usize + 1);
-        std::fs::write(dir.join("huge.json"), huge).expect("the file");
-        let (found, errors) = Theme::available_in(Some(&dir));
+        std::fs::write(dir.path().join("huge.json"), huge).expect("the file");
+        let (found, errors) = Theme::available_in(Some(dir.path()));
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("huge.json"), "{errors:?}");
         assert!(found.iter().any(|t| t.name == "Mine"), "the good file still loads");

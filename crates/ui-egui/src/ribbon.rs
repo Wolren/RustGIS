@@ -3505,8 +3505,9 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let system = ui.ctx().system_theme().is_some();
     let (follows, current) = app.theme_shown(system);
     let label = format!("{}\n{current}", tl!("Theme"));
-    let themes = app.themes.clone();
+    let themes: Vec<String> = app.themes.iter().map(|t| t.name.clone()).collect();
     let errors = app.theme_errors.clone();
+    let notes = app.theme_notes.clone();
     // The browser has no settings folder to read theme files from or write one to.
     let folder = crate::theme::Theme::user_dir().is_some();
     big_menu(
@@ -3524,10 +3525,10 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                 run_notified(app, "ui.themeFile", Value::Null);
                 ui.close();
             }
-            for found in &themes {
-                let picked = app.ui.theme_name == found.name;
-                if ui.add(egui::Button::selectable(picked, found.name.as_str())).clicked() {
-                    run_notified(app, "ui.themeFile", json!({ "name": found.name }));
+            for name in &themes {
+                let picked = app.ui.theme_name == *name;
+                if ui.add(egui::Button::selectable(picked, crate::theme::label(name))).clicked() {
+                    run_notified(app, "ui.themeFile", json!({ "name": name }));
                     ui.close();
                 }
             }
@@ -3542,18 +3543,20 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                     ui.close();
                 }
             }
-            if !errors.is_empty() {
+            if !errors.is_empty() || !notes.is_empty() {
                 ui.separator();
-                let red = Tokens::get(ui.ctx()).red;
+                let tokens = Tokens::get(ui.ctx());
                 for error in &errors {
-                    ui.label(egui::RichText::new(error).color(red).small());
+                    ui.label(egui::RichText::new(error).color(tokens.red).small());
+                }
+                for note in &notes {
+                    ui.label(egui::RichText::new(note).color(tokens.text_dim).small());
                 }
             }
         },
     );
 }
 
-/// A failed action is notified, not swallowed.
 /// Runs a UI command and shows the reason when it fails.
 fn run_notified(app: &mut RustGisApp, id: &str, params: Value) {
     if let Err(e) = app.run(id, params) {

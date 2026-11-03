@@ -40,7 +40,7 @@ To start from a theme you already have, use **Load a Theme from File…**. The a
 themes folder; edit that copy and the app follows it. Loading a file whose `name` matches a theme
 already in the folder replaces that copy, and the version it replaces is kept beside it as
 `<file>.json.bak`: one backup, replaced on each save. A file that does not load is listed in red at
-the bottom of the same menu, with the token at fault.
+the bottom of the same menu, with the token at fault, and a notice says when a file was refused.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
 folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in
@@ -134,7 +134,8 @@ refused by number.
 map's light or dark defaults. It is not inferred from the colours.
 
 `metrics` are in points: item spacing, button padding, row height, corner radius and text sizes.
-Sizes are held to what a window can draw, and a file over 64 KB is not read.
+Sizes are held to what a window can draw, and a notice says when a value was held. A file over 64 KB
+is not read.
 
 ## Tokens
 

@@ -918,6 +918,8 @@ pub struct RustGisApp {
     pub themes: Vec<theme::Theme>,
     /// The theme files that did not load, with the reason.
     pub theme_errors: Vec<String>,
+    /// What the reader changed in the loaded theme files, as the menu lists it.
+    pub theme_notes: Vec<String>,
     themes_stamp: u64,
     themes_checked: f64,
     sent_title: String,
@@ -1094,6 +1096,7 @@ impl RustGisApp {
             applied_theme: None,
             themes: Vec::new(),
             theme_errors: Vec::new(),
+            theme_notes: Vec::new(),
             themes_stamp: 0,
             themes_checked: 0.0,
             sent_title: String::new(),
@@ -1639,12 +1642,40 @@ impl RustGisApp {
     fn load_themes_from(&mut self, dir: Option<&std::path::Path>) {
         self.themes_stamp = theme::Theme::folder_signature(dir);
         let (themes, errors) = theme::Theme::available_in(dir);
+        let notes: Vec<String> = themes.iter().flat_map(|t| t.notes.iter().cloned()).collect();
+        // Said before the new lists are kept, so only what the last read did not report is said.
+        self.announce_theme_errors(&errors);
+        self.announce_theme_notes(&notes);
         self.themes = themes;
         self.theme_errors = errors;
+        self.theme_notes = notes;
         // The choice outlives the file: a theme that stopped loading keeps its name.
         self.sync_named_brightness();
         // Reset so a file that reads differently is applied again on the next frame.
         self.applied_theme = None;
+    }
+
+    /// A refused file is said once, with a count; the menu keeps the reason for each.
+    fn announce_theme_errors(&mut self, errors: &[String]) {
+        let fresh = errors.iter().filter(|e| !self.theme_errors.contains(*e)).count();
+        if fresh == 0 {
+            return;
+        }
+        let text = if fresh == 1 {
+            tl!("A theme file was refused. Open Settings > Theme for the reason.").to_string()
+        } else {
+            i18n::fmt("{n} theme files were refused. Open Settings > Theme for the reason.", &[("n", &fresh.to_string())])
+        };
+        self.session.notify(text, true);
+    }
+
+    /// A value the reader had to change is said once, in the words the theme file reader wrote.
+    fn announce_theme_notes(&mut self, notes: &[String]) {
+        for note in notes {
+            if !self.theme_notes.contains(note) {
+                self.session.notify(note.clone(), false);
+            }
+        }
     }
 
     /// A file saved as the other brightness takes the interface with it, so name and look agree.
@@ -1688,6 +1719,7 @@ impl RustGisApp {
                 dark: false,
                 tokens: theme::Tokens::light(),
                 metrics: theme::Metrics::standard(),
+                notes: Vec::new(),
             })
         })
     }
@@ -2398,8 +2430,14 @@ impl RustGisApp {
                 // The brightness asked for wins: a user file may rework Light or Dark.
                 self.ui.dark = dark;
                 let wanted = if dark { "Dark" } else { "Light" };
-                self.ui.theme_name =
-                    self.themes.iter().find(|t| t.name == wanted && t.dark == dark).map(|t| t.name.clone()).unwrap_or_default();
+                // The name is the theme that will be drawn, so the button and the menu agree.
+                self.ui.theme_name = self
+                    .themes
+                    .iter()
+                    .find(|t| t.name == wanted && t.dark == dark)
+                    .or_else(|| self.themes.iter().find(|t| t.dark == dark))
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
                 self.ui.dark_follows_system = false;
                 if let Some(save) = &self.services.save_pref {
                     save("theme", &self.ui.theme_name);
@@ -4217,11 +4255,11 @@ impl RustGisApp {
             tl!("Follow the System").to_string()
         } else if let Some(drawn) = self.drawn() {
             // The drawn theme is named: a file that stopped loading is not.
-            drawn.name.clone()
+            theme::label(&drawn.name)
         } else if self.ui.dark {
-            tl!("Dark").to_string()
+            theme::label("Dark")
         } else {
-            tl!("Light").to_string()
+            theme::label("Light")
         };
         (follows, name)
     }
@@ -4776,6 +4814,7 @@ mod look_tests {
             dark: true,
             tokens: theme::Tokens::dark(),
             metrics: theme::Metrics::standard(),
+            notes: Vec::new(),
         });
         app.services.load_pref = Some(Box::new(move |key: &str| prefs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string())));
         app
@@ -4982,6 +5021,51 @@ mod look_tests {
         std::fs::write(dir.path().join("deleted.json"), saved.to_json().expect("json")).expect("the file");
         app.load_themes_from(Some(dir.path()));
         assert_eq!(app.current_theme().name, "Deleted", "the saved choice is restored");
+    }
+
+    #[test]
+    fn the_theme_command_names_the_theme_it_draws() {
+        let mut app = app_with(&[]);
+        app.take_saved_look();
+        // The built-in Dark replaced by a light-flagged file, and a dark user theme beside it.
+        let mut dark_named_light = builtin(false);
+        dark_named_light.name = "Dark".to_string();
+        let mut cobalt = builtin(true);
+        cobalt.name = "Cobalt".to_string();
+        app.themes = vec![builtin(false), dark_named_light, cobalt];
+        app.run("ui.theme", serde_json::json!({ "dark": true })).expect("the command");
+        assert_eq!(app.ui.theme_name, "Cobalt", "the name follows the theme drawn");
+        assert_eq!(app.current_theme().name, "Cobalt");
+        assert_eq!(app.theme_shown(true).1, "Cobalt");
+    }
+
+    #[test]
+    fn a_refused_theme_file_is_said_once() {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        std::fs::write(dir.path().join("half.json"), "{\"schema\": 1}").expect("the file");
+        let mut app = app_with(&[]);
+        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("refused")).count();
+        let before = said(&app);
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(said(&app) - before, 1, "the refusal is said");
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(said(&app) - before, 1, "the same refusal is not repeated");
+    }
+
+    #[test]
+    fn a_held_size_is_said_once() {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let text = r#"{"schema": 1, "name": "Mine", "extends": "Light", "metrics": {"body": 1e9}}"#;
+        std::fs::write(dir.path().join("mine.json"), text).expect("the file");
+        let mut app = app_with(&[]);
+        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("held to what the window draws")).count();
+        let before = said(&app);
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(said(&app) - before, 1, "the held size is said");
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(said(&app) - before, 1, "and not again on the next watch tick");
     }
 
     fn builtin(dark: bool) -> theme::Theme {

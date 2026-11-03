@@ -25,6 +25,16 @@ fn every_catalog_parses_cleanly_and_keeps_placeholders() {
 }
 
 #[test]
+fn every_catalog_names_the_built_in_themes() {
+    for l in &LANGUAGES[1..] {
+        let (m, _) = parse(l.source);
+        for key in ["Light", "Dark"] {
+            assert!(m.contains_key(key), "{}: no {key} label", l.code);
+        }
+    }
+}
+
+#[test]
 fn lookup_fallback_and_tags() {
     assert_eq!(tr(Lang::EN, "Explore"), "Explore");
     assert_eq!(tr(Lang::EN, "no such string"), "no such string");
