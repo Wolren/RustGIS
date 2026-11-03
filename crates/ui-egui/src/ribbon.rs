@@ -3506,6 +3506,8 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let (follows, current) = app.theme_shown(system);
     let label = format!("{}\n{current}", tl!("Theme"));
     let themes: Vec<String> = app.themes.iter().map(|t| t.name.clone()).collect();
+    // The drawn theme is marked: a saved name whose file stopped loading is not drawn.
+    let drawn = app.drawn().map(|t| t.name.clone());
     let errors = app.theme_errors.clone();
     let notes = app.theme_notes.clone();
     // The browser has no settings folder to read theme files from or write one to.
@@ -3526,7 +3528,7 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
                 ui.close();
             }
             for name in &themes {
-                let picked = app.ui.theme_name == *name;
+                let picked = !follows && drawn.as_deref() == Some(name.as_str());
                 if ui.add(egui::Button::selectable(picked, crate::theme::label(name))).clicked() {
                     run_notified(app, "ui.themeFile", json!({ "name": name }));
                     ui.close();
@@ -3557,11 +3559,9 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     );
 }
 
-/// Runs a UI command and shows the reason when it fails.
+/// Runs a UI command; `run` reports a failure itself.
 fn run_notified(app: &mut RustGisApp, id: &str, params: Value) {
-    if let Err(e) = app.run(id, params) {
-        app.session.notify(e, true);
-    }
+    let _ = app.run(id, params);
 }
 
 /// Interface scale, as egui's zoom factor.

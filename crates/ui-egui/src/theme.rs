@@ -551,7 +551,7 @@ impl Theme {
                 let path = e.path();
                 let meta = e.metadata().ok()?;
                 // Metadata carries a std clock; this runs only where a themes folder exists.
-                let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+                let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
                 Some((path.file_name()?.to_string_lossy().into_owned(), meta.len(), saved))
             })
             .collect();
@@ -593,7 +593,7 @@ impl Theme {
         let path = self.save_path(&dir)?;
         let text = self.to_json()?;
         backup_before_replace(&path, &text)?;
-        std::fs::write(&path, text).map_err(|e| why(&path, &e.to_string()))?;
+        rustgis_engine::data::io::write_atomic(&path, text.as_bytes()).map_err(|e| why(&path, &e.to_string()))?;
         Ok(path)
     }
 }
@@ -861,6 +861,7 @@ pub fn apply(ctx: &egui::Context, t: &Tokens, m: &Metrics) {
     v.widgets.active.corner_radius = corner;
     v.widgets.open.bg_fill = t.pressed;
     v.widgets.open.weak_bg_fill = t.pressed;
+    v.widgets.open.corner_radius = corner;
     v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: t.shadow };
     v.window_shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: t.shadow };
     ctx.data_mut(|d| d.insert_temp(tokens_id(), *t));
@@ -908,6 +909,13 @@ mod tests {
                 assert_eq!(colour(theme, token), *slot(&mut copy, token).expect("every token has a slot"), "{name} token {token}");
             }
             assert_eq!(theme.metrics, Metrics::standard(), "{name} metrics");
+        }
+    }
+
+    #[test]
+    fn the_shipped_files_parse_without_the_fallback() {
+        for (name, text) in [("Light", include_str!("../themes/light.json")), ("Dark", include_str!("../themes/dark.json"))] {
+            Theme::parse(name, text).expect("the shipped file parses");
         }
     }
 

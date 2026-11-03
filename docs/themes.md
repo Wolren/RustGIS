@@ -32,15 +32,16 @@ there and the button names the brightness in force instead.
 ## What the browser build does
 
 The browser has no config folder, so there is no themes folder there and **Load a Theme from File…**
-does nothing. The browser offers Follow the System, Light, Dark and the interface scale: a theme in a
-file is a desktop route. The two built-in themes are the same files, compiled in, so nothing else
+is not offered. The browser offers Follow the System, Light, Dark and the interface scale: a theme in
+a file is a desktop route. The two built-in themes are the same files, compiled in, so nothing else
 differs.
 
-To start from a theme you already have, use **Load a Theme from File…**. The app keeps a copy in the
-themes folder; edit that copy and the app follows it. Loading a file whose `name` matches a theme
-already in the folder replaces that copy, and the version it replaces is kept beside it as
-`<file>.json.bak`: one backup, replaced on each save. A file that does not load is listed in red at
-the bottom of the same menu, with the token at fault, and a notice says when a file was refused.
+On the desktop, to start from a theme you already have, use **Load a Theme from File…**. The app
+keeps a copy in the themes folder; edit that copy and the app follows it. Loading a file whose `name`
+matches a theme already in the folder replaces that copy, and the version it replaces is kept beside
+it as `<file>.json.bak`: one backup, replaced on each save. A file that does not load is listed in
+red at the bottom of the same menu with its reason. A bad colour, size or name is named by its
+token, and a notice says when a file was refused.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
 folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in

@@ -2467,7 +2467,10 @@ impl RustGisApp {
             }
             "ui.scale" => {
                 let factor = match p.get("factor") {
-                    Some(given) => given.as_f64().ok_or_else(|| i18n::fmt("ui.scale needs a number at factor", &[]))? as f32,
+                    Some(given) => given
+                        .as_f64()
+                        .ok_or_else(|| i18n::fmt("ui.scale needs a number at factor", &[]))?
+                        .clamp(f64::from(f32::MIN), f64::from(f32::MAX)) as f32,
                     None => 1.0,
                 };
                 self.ui.interface_scale = theme::clamp_scale(factor);
@@ -4262,6 +4265,11 @@ impl RustGisApp {
             theme::label("Light")
         };
         (follows, name)
+    }
+
+    /// A number that changes when the theme files are read again, for a caller that caches a look.
+    pub fn theme_revision(&self) -> u64 {
+        self.themes_stamp
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
