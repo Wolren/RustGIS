@@ -925,6 +925,8 @@ pub struct RustGisApp {
     /// What the reader changed in the loaded theme files, as the menu lists it.
     pub theme_notes: Vec<String>,
     themes_stamp: u64,
+    /// Changes on every folder read, including explicit reloads with unchanged metadata.
+    themes_revision: u64,
     themes_checked: f64,
     sent_title: String,
     pub quit_requested: bool,
@@ -1102,6 +1104,7 @@ impl RustGisApp {
             theme_errors: Vec::new(),
             theme_notes: Vec::new(),
             themes_stamp: 0,
+            themes_revision: 0,
             themes_checked: 0.0,
             sent_title: String::new(),
             quit_requested: false,
@@ -1647,6 +1650,7 @@ impl RustGisApp {
     /// Reads the folder; the stamp is taken first, so a save during the read is picked up next time.
     fn load_themes_from(&mut self, dir: Option<&std::path::Path>) {
         self.themes_stamp = theme::Theme::folder_signature(dir);
+        self.themes_revision = self.themes_revision.wrapping_add(1);
         let (themes, errors) = theme::Theme::available_in(dir);
         let notes: Vec<String> = themes.iter().flat_map(|t| t.notes.iter().cloned()).collect();
         // Said before the new lists are kept, so only what the last read did not report is said.
@@ -4302,7 +4306,7 @@ impl RustGisApp {
 
     /// A number that changes when the theme files are read again, for a caller that caches a look.
     pub fn theme_revision(&self) -> u64 {
-        self.themes_stamp
+        self.themes_revision
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -4978,6 +4982,11 @@ mod look_tests {
         let log = saved_by(&mut app);
         app.load_themes_from(Some(dir.path()));
         app.use_theme("Cobalt").expect("the file loads");
+        let stamp = app.themes_stamp;
+        let revision = app.theme_revision();
+        app.load_themes_from(Some(dir.path()));
+        assert_eq!(app.themes_stamp, stamp, "metadata remains unchanged");
+        assert_ne!(app.theme_revision(), revision, "an explicit reload invalidates a caller's cached appearance");
         // The same file saved as a light theme: the interface takes its brightness with it.
         cobalt.dark = false;
         cobalt.tokens = theme::Tokens::light();

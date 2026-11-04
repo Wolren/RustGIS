@@ -661,7 +661,7 @@ pub fn shortcuts(app: &mut RustGisApp, ctx: &egui::Context) {
 
 /// Whether a UI command is available on the current platform.
 pub(crate) fn command_available(id: &str, web: bool) -> bool {
-    !web || !matches!(id, "ui.checkUpdate" | "ui.mcpRelay")
+    !web || !matches!(id, "ui.checkUpdate" | "ui.mcpRelay" | "ui.themeLoad" | "ui.themeReload")
 }
 
 /// The `ui.*` commands Command Search lists: (id, label, ribbon location).
@@ -991,8 +991,8 @@ pub fn command_search(app: &mut RustGisApp, ctx: &egui::Context) {
             }
         }
         for &(id, label, loc) in UI_COMMANDS {
-            // The web app always serves the latest release (no Check for Updates button) and is
-            // one process a loopback relay could not reach (`ui.mcpRelay` is desktop only).
+            // Match the platform availability used by the shortcut editor, including desktop
+            // theme files and the loopback relay.
             if !command_available(id, cfg!(target_arch = "wasm32")) {
                 continue;
             }
