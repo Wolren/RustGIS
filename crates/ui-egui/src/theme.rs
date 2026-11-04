@@ -616,8 +616,9 @@ impl Theme {
                 return Ok(path);
             }
             // A file that cannot be read, or is too big, is left alone: the next name is used.
+            let own = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
             if let Ok(text) = read_text(&path)
-                && Theme::parse(&stem, &text).is_ok_and(|found| found.name == self.name)
+                && Theme::parse(&own, &text).is_ok_and(|found| found.name == self.name)
             {
                 return Ok(path);
             }
@@ -1209,6 +1210,13 @@ mod tests {
         let other = theme_folder(&[("ocean.json", light().to_json().expect("json").as_str())]);
         let path = mine.save_path(other.path()).expect("a free file");
         assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("mine.json"), "another name keeps its own file");
+        let numbered = theme_folder(&[
+            ("ocean.json", r#"{"schema":1,"extends":"Light","name":"Sea"}"#),
+            ("ocean-2.json", r#"{"schema":1,"extends":"Light"}"#),
+        ]);
+        let ocean = Theme::parse("ocean", r#"{"schema":1,"extends":"Light"}"#).expect("a nameless imported theme");
+        let path = ocean.save_path(numbered.path()).expect("a free file");
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("ocean-3.json"), "the numbered file owns its own fallback name");
     }
 
     #[test]
