@@ -801,13 +801,20 @@ fn save_theme_text_with(
     } else {
         None
     };
+    let recovery = target.with_extension("json.recover");
     if old.as_deref() == Some(text) {
-        return Ok(());
+        return match std::fs::symlink_metadata(&recovery) {
+            Ok(_) => Err(i18n::fmt(
+                "{path}: the theme is unchanged, but a recovery copy remains at {recovery}; compare the files before removing it and retrying.",
+                &[("path", &target.display().to_string()), ("recovery", &recovery.display().to_string())],
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(why(&recovery, &error.to_string())),
+        };
     }
     let permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
     // Keep a separate recovery copy before replacing either user-visible file. It survives
     // interruption; a subsequent save refuses to overwrite it until the user recovers it.
-    let recovery = target.with_extension("json.recover");
     if let Some(old) = &old {
         use std::io::Write;
         let mut out =
@@ -1509,10 +1516,12 @@ mod tests {
     fn an_interrupted_save_keeps_its_recovery_copy() {
         let dir = theme_folder(&[("mine.json", "new"), ("mine.json.bak", "older"), ("mine.json.recover", "old")]);
         let path = dir.path().join("mine.json");
-        let why = save_theme_text(&path, "next").expect_err("recover the interrupted save first");
-        assert!(why.contains("mine.json.recover"), "{why}");
-        for (file, text) in [("mine.json", "new"), ("mine.json.bak", "older"), ("mine.json.recover", "old")] {
-            assert_eq!(std::fs::read_to_string(dir.path().join(file)).expect("preserved file"), text);
+        for attempted in ["new", "next"] {
+            let why = save_theme_text(&path, attempted).expect_err("recover the interrupted save first");
+            assert!(why.contains("mine.json.recover"), "{why}");
+            for (file, text) in [("mine.json", "new"), ("mine.json.bak", "older"), ("mine.json.recover", "old")] {
+                assert_eq!(std::fs::read_to_string(dir.path().join(file)).expect("preserved file"), text);
+            }
         }
     }
 
