@@ -2627,6 +2627,9 @@ impl RustGisApp {
                 }
             }
             "ui.themeLoad" => {
+                if cfg!(target_arch = "wasm32") {
+                    return Err(i18n::fmt("Loading a theme file needs the desktop app", &[]));
+                }
                 let Some(path) = dialogs::pick_open(&["json"], tl!("A theme file")) else { return Ok(Value::Null) };
                 self.load_theme_file(std::path::Path::new(&path))?;
             }
