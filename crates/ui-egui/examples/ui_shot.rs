@@ -200,6 +200,10 @@ fn main() {
     for _ in 0..6 {
         harness.step();
     }
+    // The split showcase skips frame logic, so load user themes before scripted selection.
+    if ribbon_split && let Err(error) = harness.state_mut().run("ui.themeReload", Value::Null) {
+        eprintln!("ui.themeReload: {error}");
+    }
     // The button the last drag holds down.
     let mut held = egui::PointerButton::Primary;
     // And the modifiers held with it.
