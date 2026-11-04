@@ -1696,13 +1696,19 @@ impl RustGisApp {
             return;
         }
         if let Some(dark) = self.themes.iter().find(|t| t.name == self.ui.theme_name).map(|t| t.dark) {
-            self.ui.dark = dark;
+            if self.ui.dark != dark {
+                self.ui.dark = dark;
+                if let Some(save) = &self.services.save_pref {
+                    save("dark", if dark { "true" } else { "false" });
+                }
+            }
             // The loaded theme owns its brightness; following the platform would overwrite it.
             self.ui.dark_follows_system = false;
         }
     }
 
-    /// Reads the folder again when a file in it was added, removed or saved, at most once a second.
+    /// Reloads when file names, sizes or modification times change, at most once a second.
+    /// A save preserving size and timestamp needs Reload Themes.
     fn refresh_themes(&mut self, ctx: &egui::Context) {
         let Some(dir) = theme::Theme::user_dir() else { return };
         ctx.request_repaint_after(web_time::Duration::from_secs(1));
@@ -1786,13 +1792,13 @@ impl RustGisApp {
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
         let theme = theme::Theme::parse(&stem, &text).map_err(|e| said(&e))?;
         // Keep the original file text. Remember its notes before reloading so they are announced once.
+        let kept = theme.save_user(&text)?;
         self.announce_theme_notes(&theme.notes);
         for note in &theme.notes {
             if !self.theme_notes.contains(note) {
                 self.theme_notes.push(note.clone());
             }
         }
-        let kept = theme.save_user(&text)?;
         self.load_themes();
         self.use_theme(&theme.name)?;
         let kept = kept.display().to_string();
@@ -2502,7 +2508,7 @@ impl RustGisApp {
                     );
                 }
                 if let Some(save) = &self.services.save_pref {
-                    save("ui_scale", &format!("{:.2}", self.ui.interface_scale));
+                    save("ui_scale", &self.ui.interface_scale.to_string());
                 }
             }
             "ui.themeReload" => self.load_themes(),
@@ -4916,6 +4922,9 @@ mod look_tests {
         assert_eq!(app.ui.interface_scale, 1.25, "the menu scale is kept, not read back as the old zoom");
         assert!((ctx.zoom_factor() - 1.25).abs() < 0.001, "and the interface is drawn at it");
         assert!(log.lock().expect("the log").iter().any(|(k, v)| k == "ui_scale" && v == "1.25"));
+        app.run("ui.scale", serde_json::json!({ "factor": 1.234 })).expect("a fractional scale");
+        let kept = log.lock().expect("the log").iter().rev().find(|(k, _)| k == "ui_scale").unwrap().1.clone();
+        assert_eq!(kept.parse::<f32>().expect("saved scale"), app.ui.interface_scale, "restart retains full precision");
         // Past the limit the command holds the scale.
         app.run("ui.scale", serde_json::json!({ "factor": 3.0 })).expect("the command");
         app.logic(&ctx);
@@ -4966,6 +4975,7 @@ mod look_tests {
         cobalt.name = "Cobalt".to_string();
         std::fs::write(&path, cobalt.to_json().expect("json")).expect("the file");
         let mut app = app_with(&[]);
+        let log = saved_by(&mut app);
         app.load_themes_from(Some(dir.path()));
         app.use_theme("Cobalt").expect("the file loads");
         // The same file saved as a light theme: the interface takes its brightness with it.
@@ -4974,6 +4984,10 @@ mod look_tests {
         std::fs::write(&path, cobalt.to_json().expect("json")).expect("the file");
         app.load_themes_from(Some(dir.path()));
         assert!(!app.ui.dark, "the interface takes the brightness of the theme it names");
+        assert!(
+            log.lock().expect("the log").iter().any(|(key, value)| key == "dark" && value == "false"),
+            "restart retains the adopted brightness"
+        );
         assert_eq!(app.current_theme().name, "Cobalt", "the named theme is drawn");
         assert_eq!(app.theme_shown(true).1, "Cobalt");
     }

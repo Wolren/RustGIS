@@ -46,8 +46,9 @@ it as `<file>.json.bak`: one backup, replaced on each save. A file that does not
 red at the bottom of the same menu with its reason. Unknown tokens and bad colour strings name
 the token; values of the wrong JSON type give a line and column. A notice says when a file was refused.
 
-A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
-folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in
+The app checks file names, sizes and modification times once a second while it runs. A save
+that changes that metadata is picked up automatically. If a save preserves both size and
+modification time, use **Reload Themes** to reread it. A theme in use that stops loading leaves the window on the nearest built-in
 until it loads again: the button names the theme drawn, the menu gives the reason, and the choice
 returns with the file.
 

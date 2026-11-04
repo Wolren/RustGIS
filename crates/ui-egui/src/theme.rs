@@ -558,7 +558,14 @@ impl Theme {
         (themes, errors)
     }
 
+    /// The browser has no user theme folder or filesystem watcher.
+    #[cfg(target_arch = "wasm32")]
+    pub fn folder_signature(_dir: Option<&std::path::Path>) -> u64 {
+        0
+    }
+
     /// Hash of each file's name, size and mtime, from metadata alone: no file is read.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn folder_signature(dir: Option<&std::path::Path>) -> u64 {
         use std::hash::{Hash, Hasher};
         let Some(dir) = dir else { return 0 };
@@ -571,7 +578,7 @@ impl Theme {
                 // std::fs::metadata follows a symlink, as read_text does; DirEntry::metadata does not.
                 let meta = std::fs::metadata(&path).ok()?;
                 // Metadata carries a std clock; this runs only where a themes folder exists.
-                let saved = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+                let saved = meta.modified().ok()?.duration_since(web_time::UNIX_EPOCH).ok()?.as_nanos();
                 Some((path.file_name()?.to_string_lossy().into_owned(), meta.len(), saved))
             })
             .collect();
@@ -790,7 +797,16 @@ fn save_theme_text(path: &std::path::Path, text: &str) -> Result<(), String> {
     // The old backup is changed only after the new theme was saved successfully.
     if let Some(old) = old {
         let kept = target.with_extension("json.bak");
-        write_theme_text(&kept, &old, permissions).map_err(|e| why(&kept, &e.to_string()))?;
+        if let Err(error) = write_theme_text(&kept, &old, permissions.clone()) {
+            let reason = why(&kept, &error.to_string());
+            if let Err(restore) = write_theme_text(&target, &old, permissions) {
+                return Err(i18n::fmt(
+                    "{reason}; the previous theme could not be restored: {restore}",
+                    &[("reason", &reason), ("restore", &restore.to_string())],
+                ));
+            }
+            return Err(reason);
+        }
     }
     Ok(())
 }
@@ -1387,6 +1403,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("backup"), "older");
     }
 
+    /// A refused backup must not leave a new theme behind after reporting a failed import.
+    #[test]
+    fn a_failed_backup_restores_the_theme() {
+        let dir = theme_folder(&[("mine.json", "old")]);
+        let path = dir.path().join("mine.json");
+        let backup = dir.path().join("mine.json.bak");
+        std::fs::create_dir(&backup).expect("a blocked backup destination");
+        assert!(save_theme_text(&path, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("theme"), "old");
+        assert!(backup.is_dir(), "the blocked destination is preserved");
+    }
+
     #[test]
     fn two_names_that_share_a_stem_keep_two_files() {
         let dir = theme_folder(&[]);
@@ -1418,7 +1446,8 @@ mod tests {
     fn only_a_plain_file_is_opened() {
         let dir = theme_folder(&[]);
         match read_text(dir.path()) {
-            Err(Over::Reason(why)) => assert!(why.contains("not a file"), "{why}"),
+            // Windows refuses the directory at open; Unix rejects its opened handle's type.
+            Err(Over::Reason(why)) => assert!(!why.is_empty(), "a rejected directory has a reason"),
             other => panic!("{other:?}"),
         }
     }
