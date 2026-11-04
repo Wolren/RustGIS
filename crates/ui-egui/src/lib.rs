@@ -1131,7 +1131,7 @@ impl RustGisApp {
         // isn't written to the preferences.
         let ui =
             UiState { keymap: keymap::Keymap::new(&s.registry), layout_favourite_saved: s.layout_favourite.clone(), ..UiState::default() };
-        let mut app = RustGisApp {
+        RustGisApp {
             session: s,
             ui,
             map: mapview::MapView::default(),
@@ -1155,7 +1155,7 @@ impl RustGisApp {
             fonts_frames: 0,
             frame_start: None,
             applied_theme: None,
-            themes: Vec::new(),
+            themes: theme::Theme::builtin(),
             theme_errors: Vec::new(),
             theme_notes: Vec::new(),
             themes_stamp: 0,
@@ -1191,9 +1191,7 @@ impl RustGisApp {
             seen_project: None,
             autosave: Default::default(),
             save_prompt: Default::default(),
-        };
-        app.load_themes();
-        app
+        }
     }
 
     /// Installs the shell's platform hooks and reads what they keep: preferences, saved
@@ -1210,6 +1208,8 @@ impl RustGisApp {
         if let Some(lang) = self.services.load_pref.as_ref().and_then(|load| load("language")) {
             self.ui.language = lang;
         }
+        // Theme readers and startup notices keep translated text, so select the language before reading.
+        i18n::set_current(self.chosen_lang());
         // A stored value that is neither `auto` nor a known worldview means `auto`.
         if let Some(w) = self.services.load_pref.as_ref().and_then(|load| load("worldview"))
             && rustgis_engine::sample::Worldview::from_code(&w).is_some()
@@ -5159,6 +5159,37 @@ mod look_tests {
         });
         app.services.load_pref = Some(Box::new(move |key: &str| prefs.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_string())));
         app
+    }
+
+    #[test]
+    fn theme_startup_reads_after_the_saved_language_is_selected() {
+        struct RestoreLanguage(crate::i18n::Lang);
+        impl Drop for RestoreLanguage {
+            /// Restores this test thread's caller language even if the startup assertion fails.
+            fn drop(&mut self) {
+                crate::i18n::set_current(self.0);
+            }
+        }
+        let _restore = RestoreLanguage(crate::i18n::current());
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let app = RustGisApp::with_sample();
+        assert_eq!(app.themes_revision, 0, "construction must not read user themes or emit their notices");
+        assert_eq!(app.themes.len(), 2, "built-in themes remain available before platform services");
+        let services = super::Services {
+            load_pref: Some(Box::new(|key| {
+                if key == "language" {
+                    return Some("de".to_string());
+                }
+                if key == "theme" {
+                    assert_eq!(crate::i18n::current().code(), "de", "the theme folder was read in the chosen language");
+                }
+                None
+            })),
+            ..super::Services::default()
+        };
+        let app = app.with_services(services);
+        assert_eq!(app.themes_revision, 1, "the folder is read once during preference restoration");
+        assert_eq!(crate::i18n::current().code(), "de");
     }
 
     #[test]
