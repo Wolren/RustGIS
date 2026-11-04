@@ -389,10 +389,34 @@ struct Raw {
     extends: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dark: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "read_colours")]
     colours: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metrics: Option<MetricsFile>,
+}
+
+/// Rejects repeated colour names before a map could silently replace their first value.
+fn read_colours<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error> {
+    struct Colours;
+    impl<'de> serde::de::Visitor<'de> for Colours {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of unique colour names to colour strings")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut colours = BTreeMap::new();
+            while let Some((name, value)) = map.next_entry::<String, String>()? {
+                if colours.contains_key(&name) {
+                    return Err(serde::de::Error::custom(i18n::fmt("duplicate colour {name}", &[("name", &name)])));
+                }
+                colours.insert(name, value);
+            }
+            Ok(colours)
+        }
+    }
+    deserializer.deserialize_map(Colours)
 }
 
 impl Theme {
@@ -1203,6 +1227,16 @@ mod tests {
         json["colours"]["accent"] = serde_json::json!("#+F+F+F");
         let err = Theme::parse("Mine", &json.to_string()).expect_err("a plus sign is not a hex digit");
         assert!(err.to_lowercase().contains("accent"), "{err}");
+    }
+
+    #[test]
+    fn a_repeated_colour_is_refused_by_name() {
+        let repeated = r##"{"schema":1,"extends":"Dark","colours":{"accent":"#111111","accent":"#222222"}}"##;
+        let error = Theme::parse("Mine", repeated).expect_err("a repeated colour cannot replace the first silently");
+        assert!(error.contains("duplicate colour accent"), "{error}");
+        let clean = r##"{"schema":1,"extends":"Dark","colours":{"accent":"#222222"}}"##;
+        let theme = Theme::parse("Mine", clean).expect("one value per colour");
+        assert!(theme.notes.is_empty(), "{:?}", theme.notes);
     }
 
     #[test]
