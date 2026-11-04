@@ -70,9 +70,9 @@ Map operations are commands you can script from the command line, Python or the 
 
 -   **Themed**
 
-    Light and Dark ship. Write a theme as a JSON file of colours, spacing and text sizes, drop
-    it in the themes folder and pick it in Settings, or scale the whole interface from 80% to
-    200%.
+    Light and Dark ship. On the desktop, write a theme as a JSON file of colours, spacing and
+    text sizes, drop it in the themes folder and pick it in Settings. Scale the whole interface
+    from 80% to 200% in either app.
     [Themes](themes.md)
 
 </div>

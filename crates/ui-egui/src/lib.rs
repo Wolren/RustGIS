@@ -2535,7 +2535,11 @@ impl RustGisApp {
             }
             // The theme list in Settings is the one control for brightness; this picks its entry.
             "ui.theme" => {
-                let dark = p.get("dark").and_then(Value::as_bool).unwrap_or(!self.ui.dark);
+                let dark = match p.get("dark") {
+                    None => !self.ui.dark,
+                    Some(Value::Bool(dark)) => *dark,
+                    Some(_) => return Err(i18n::fmt("ui.theme needs true or false at dark", &[])),
+                };
                 // The brightness asked for wins: a user file may rework Light or Dark.
                 self.ui.dark = dark;
                 let wanted = if dark { "Dark" } else { "Light" };
@@ -5152,6 +5156,20 @@ mod look_tests {
     #[test]
     fn a_parameter_of_the_wrong_type_is_refused() {
         let mut app = app_with(&[]);
+        let log = saved_by(&mut app);
+        app.ui.dark = false;
+        app.ui.theme_name = "Custom".to_string();
+        app.ui.dark_follows_system = true;
+        for dark in [serde_json::json!("false"), serde_json::json!(0), serde_json::Value::Null] {
+            let why = app.run("ui.theme", serde_json::json!({ "dark": dark })).expect_err("dark must be a boolean");
+            assert!(why.contains("ui.theme"), "{why}");
+            assert!(!app.ui.dark);
+            assert_eq!(app.ui.theme_name, "Custom");
+            assert!(app.ui.dark_follows_system);
+            assert!(log.lock().expect("the log").is_empty(), "rejection saves no preferences");
+        }
+        app.run("ui.theme", serde_json::json!({})).expect("omitting dark still toggles");
+        assert!(app.ui.dark);
         let why = app.run("ui.themeFile", serde_json::json!({ "name": 5 })).expect_err("a name must be a string");
         assert!(why.contains("ui.themeFile"), "{why}");
         let why = app.run("ui.scale", serde_json::json!({ "factor": "big" })).expect_err("a factor must be a number");

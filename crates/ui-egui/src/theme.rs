@@ -245,7 +245,7 @@ struct MetricsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     row_height: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    corner_radius: Option<u8>,
+    corner_radius: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,7 +264,7 @@ impl MetricsFile {
             item_spacing: Some(metrics.item_spacing),
             button_padding: Some(metrics.button_padding),
             row_height: Some(metrics.row_height),
-            corner_radius: Some(metrics.corner_radius),
+            corner_radius: Some(u64::from(metrics.corner_radius)),
             body: Some(metrics.body),
             button_text: Some(metrics.button_text),
             small: Some(metrics.small),
@@ -285,7 +285,7 @@ impl MetricsFile {
             metrics.row_height = v;
         }
         if let Some(v) = self.corner_radius {
-            metrics.corner_radius = v;
+            metrics.corner_radius = u8::try_from(v).unwrap_or(u8::MAX);
         }
         if let Some(v) = self.body {
             metrics.body = v;
@@ -794,21 +794,63 @@ fn save_theme_text(path: &std::path::Path, text: &str) -> Result<(), String> {
         return Ok(());
     }
     let permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
-    write_theme_text(&target, text, permissions.clone()).map_err(|e| why(&target, &e.to_string()))?;
-    // The old backup is changed only after the new theme was saved successfully.
-    if let Some(old) = old {
-        let kept = target.with_extension("json.bak");
-        if let Err(error) = write_theme_text(&kept, &old, permissions.clone()) {
-            let reason = why(&kept, &error.to_string());
-            if let Err(restore) = write_theme_text(&target, &old, permissions) {
-                return Err(i18n::fmt(
-                    "{reason}; the previous theme could not be restored: {restore}",
-                    &[("reason", &reason), ("restore", &restore.to_string())],
-                ));
+    // Keep a separate recovery copy before replacing either user-visible file. It survives
+    // interruption; a subsequent save refuses to overwrite it until the user recovers it.
+    let recovery = target.with_extension("json.recover");
+    if let Some(old) = &old {
+        use std::io::Write;
+        let mut out =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&recovery).map_err(|e| why(&recovery, &e.to_string()))?;
+        let staged = (|| -> std::io::Result<()> {
+            if let Some(permissions) = permissions.clone() {
+                out.set_permissions(permissions)?;
             }
-            return Err(reason);
+            out.write_all(old.as_bytes())?;
+            out.sync_all()?;
+            sync_theme_folder(&target)
+        })();
+        drop(out);
+        if let Err(error) = staged {
+            let _ = std::fs::remove_file(&recovery);
+            return Err(why(&recovery, &error.to_string()));
         }
     }
+    let saved = (|| -> Result<(), String> {
+        write_theme_text(&target, text, permissions.clone()).map_err(|e| why(&target, &e.to_string()))?;
+        // The old backup is changed only after the new theme was saved successfully.
+        if let Some(old) = &old {
+            let kept = target.with_extension("json.bak");
+            if let Err(error) = write_theme_text(&kept, old, permissions.clone()) {
+                let reason = why(&kept, &error.to_string());
+                if let Err(restore) = write_theme_text(&target, old, permissions.clone()) {
+                    return Err(i18n::fmt(
+                        "{reason}; the previous theme is kept at {recovery}; restoration failed: {restore}",
+                        &[("reason", &reason), ("recovery", &recovery.display().to_string()), ("restore", &restore.to_string())],
+                    ));
+                }
+                sync_theme_folder(&target).map_err(|e| why(&recovery, &e.to_string()))?;
+                std::fs::remove_file(&recovery).map_err(|e| why(&recovery, &e.to_string()))?;
+                return Err(reason);
+            }
+            sync_theme_folder(&target).map_err(|e| why(&recovery, &e.to_string()))?;
+        }
+        Ok(())
+    })();
+    saved?;
+    if old.is_some() {
+        std::fs::remove_file(&recovery).map_err(|e| why(&recovery, &e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Persists the recovery entry and completed renames on systems that support directory syncing.
+fn sync_theme_folder(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1423,6 +1465,18 @@ mod tests {
         assert!(backup.is_dir(), "the blocked destination is preserved");
     }
 
+    /// A recovery copy left by an interrupted save is never overwritten by the next save.
+    #[test]
+    fn an_interrupted_save_keeps_its_recovery_copy() {
+        let dir = theme_folder(&[("mine.json", "new"), ("mine.json.bak", "older"), ("mine.json.recover", "old")]);
+        let path = dir.path().join("mine.json");
+        let why = save_theme_text(&path, "next").expect_err("recover the interrupted save first");
+        assert!(why.contains("mine.json.recover"), "{why}");
+        for (file, text) in [("mine.json", "new"), ("mine.json.bak", "older"), ("mine.json.recover", "old")] {
+            assert_eq!(std::fs::read_to_string(dir.path().join(file)).expect("preserved file"), text);
+        }
+    }
+
     #[test]
     fn two_names_that_share_a_stem_keep_two_files() {
         let dir = theme_folder(&[]);
@@ -1488,7 +1542,7 @@ mod tests {
         let mut json: serde_json::Value = serde_json::from_str(&light().to_json().expect("json")).expect("json");
         json["metrics"]["body"] = serde_json::json!(1e9);
         json["metrics"]["small"] = serde_json::json!(-5.0);
-        json["metrics"]["corner_radius"] = serde_json::json!(250);
+        json["metrics"]["corner_radius"] = serde_json::json!(4096);
         json["metrics"]["item_spacing"] = serde_json::json!([1e9, -1e9]);
         let theme = Theme::parse("Mine", &json.to_string()).expect("it parses");
         assert_eq!(theme.metrics.body, 40.0, "a huge size is held to the largest drawn");

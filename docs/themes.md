@@ -42,7 +42,9 @@ On the desktop, to start from a theme you already have, use **Load a Theme from 
 keeps the source text, including inherited settings and exact colour strings, in the themes folder
 (adding the resolved name if the file omitted it); edit that copy and the app follows it. Loading a file whose `name`
 matches a theme already in the folder replaces that copy, and the version it replaces is kept beside
-it as `<file>.json.bak`: one backup, replaced on each save. A file that does not load is listed in
+it as `<file>.json.bak`: one backup, replaced on each save. An interrupted save may leave
+`<file>.json.recover`, containing the theme from before the save. Copy it somewhere safe,
+compare it with the theme and backup, then remove the recovery file before saving again. A file that does not load is listed in
 red at the bottom of the same menu with its reason. Unknown tokens and bad colour strings name
 the token; values of the wrong JSON type give a line and column. A notice says when a file was refused.
 
