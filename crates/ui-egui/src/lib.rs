@@ -1829,6 +1829,12 @@ impl RustGisApp {
         }
         let scale = pref(self, "ui_scale").and_then(|v| v.parse::<f32>().ok());
         self.ui.interface_scale = scale.map_or(1.0, theme::clamp_scale);
+        if scale.is_some_and(|factor| factor != self.ui.interface_scale) {
+            self.session.notify(
+                i18n::fmt("Interface scale held to {percent}%", &[("percent", &format!("{:.0}", self.ui.interface_scale * 100.0))]),
+                false,
+            );
+        }
     }
 
     /// Selects a loaded theme and saves its name and brightness; unknown names leave the choice unchanged.
@@ -2541,6 +2547,9 @@ impl RustGisApp {
             }
             // The theme list in Settings is the one control for brightness; this picks its entry.
             "ui.theme" => {
+                if !p.is_null() && !p.as_object().is_some_and(|params| params.keys().all(|key| key == "dark")) {
+                    return Err(i18n::fmt("ui.theme accepts only the dark parameter", &[]));
+                }
                 let dark = match p.get("dark") {
                     None => !self.ui.dark,
                     Some(Value::Bool(dark)) => *dark,
@@ -2565,6 +2574,9 @@ impl RustGisApp {
             }
             // Picks a theme by name; no name follows the system again.
             "ui.themeFile" => {
+                if !p.is_null() && !p.as_object().is_some_and(|params| params.keys().all(|key| key == "name")) {
+                    return Err(i18n::fmt("ui.themeFile accepts only the name parameter", &[]));
+                }
                 let name = match p.get("name") {
                     Some(given) => given.as_str().ok_or_else(|| i18n::fmt("ui.themeFile needs a name string", &[]))?.trim().to_string(),
                     None => String::new(),
@@ -5070,6 +5082,22 @@ mod look_tests {
         assert!((ctx.zoom_factor() - 2.0).abs() < 0.001, "and the context is put back to the menu's value");
     }
 
+    /// A persisted out-of-range scale reports its adjustment; a clean setting stays quiet.
+    #[test]
+    fn a_saved_scale_adjustment_is_reported() {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let mut held = app_with(&[("ui_scale", "9")]);
+        held.session.notices.clear();
+        held.take_saved_look();
+        assert_eq!(held.ui.interface_scale, 2.0);
+        assert_eq!(held.session.notices.iter().filter(|n| n.text == "Interface scale held to 200%").count(), 1);
+        let mut clean = app_with(&[("ui_scale", "1.25")]);
+        clean.session.notices.clear();
+        clean.take_saved_look();
+        assert_eq!(clean.ui.interface_scale, 1.25);
+        assert!(clean.session.notices.is_empty());
+    }
+
     #[test]
     fn a_choice_outlives_a_file_that_stops_loading() {
         let dir = tempfile::tempdir().expect("a temporary folder");
@@ -5182,6 +5210,19 @@ mod look_tests {
             assert_eq!(app.ui.theme_name, "Custom");
             assert!(app.ui.dark_follows_system);
             assert!(log.lock().expect("the log").is_empty(), "rejection saves no preferences");
+        }
+        for params in [serde_json::json!({"nmae":"Mine"}), serde_json::json!("Mine"), serde_json::json!({"name":"Mine", "extra":true})] {
+            assert!(app.run("ui.themeFile", params).is_err());
+            assert_eq!(app.ui.theme_name, "Custom");
+            assert!(!app.ui.dark);
+            assert!(app.ui.dark_follows_system);
+            assert!(log.lock().expect("the log").is_empty(), "malformed parameters save no preferences");
+        }
+        for params in [serde_json::json!({"drak":false}), serde_json::json!("Dark")] {
+            assert!(app.run("ui.theme", params).is_err());
+            assert_eq!(app.ui.theme_name, "Custom");
+            assert!(!app.ui.dark);
+            assert!(log.lock().expect("the log").is_empty());
         }
         app.run("ui.theme", serde_json::json!({})).expect("omitting dark still toggles");
         assert!(app.ui.dark);

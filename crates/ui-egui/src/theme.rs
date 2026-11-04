@@ -897,7 +897,7 @@ fn stem_of(name: &str) -> String {
         || stem
             .strip_prefix("com")
             .or_else(|| stem.strip_prefix("lpt"))
-            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"));
     if stem.is_empty() {
         "theme".to_string()
     } else if reserved {
@@ -1420,7 +1420,7 @@ mod tests {
         let source = r##"{"schema":1,"name":"Mine","extends":"Dark","colours":{"accent":"#2563EB80"}}"##;
         let theme = Theme::parse("mine", source).expect("theme");
         assert_eq!(theme.source_text(source).expect("source"), source);
-        for name in ["CON", "NUL", "PRN", "AUX", "COM1", "LPT9"] {
+        for name in ["CON", "NUL", "PRN", "AUX", "COM1", "LPT9", "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"] {
             assert!(stem_of(name).starts_with("theme-"), "{name}");
         }
     }
