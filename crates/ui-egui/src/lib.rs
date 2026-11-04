@@ -1770,14 +1770,16 @@ impl RustGisApp {
     /// A save preserving size and timestamp needs Reload Themes.
     fn refresh_themes(&mut self, ctx: &egui::Context) {
         let Some(dir) = theme::Theme::user_dir() else { return };
-        ctx.request_repaint_after(web_time::Duration::from_secs(1));
         let now = ctx.input(|i| i.time);
-        if now < self.themes_checked + 1.0 {
-            return;
+        if now >= self.themes_checked + 1.0 {
+            self.themes_checked = now;
+            if theme::Theme::folder_signature(Some(&dir)) != self.themes_stamp {
+                self.load_themes();
+            }
         }
-        self.themes_checked = now;
-        if theme::Theme::folder_signature(Some(&dir)) != self.themes_stamp {
-            self.load_themes();
+        // Zero means no readable folder. Without one, let the app sleep until another event.
+        if self.themes_stamp != 0 {
+            ctx.request_repaint_after(web_time::Duration::from_secs(1));
         }
     }
 
@@ -1817,8 +1819,12 @@ impl RustGisApp {
             self.ui.theme_name = wanted.unwrap_or_default();
             if let Some(dark) = pref(self, "dark") {
                 // "auto" was Follow the System; a toggle stores the brightness it left.
-                self.ui.dark = dark == "true";
                 self.ui.dark_follows_system = dark == "auto";
+                self.ui.dark = if self.ui.dark_follows_system {
+                    pref(self, "dark_fallback").map_or(self.ui.dark, |value| value == "true")
+                } else {
+                    dark == "true"
+                };
             }
         }
         let scale = pref(self, "ui_scale").and_then(|v| v.parse::<f32>().ok());
@@ -2568,6 +2574,7 @@ impl RustGisApp {
                     self.ui.dark_follows_system = true;
                     if let Some(save) = &self.services.save_pref {
                         save("theme", "");
+                        save("dark_fallback", if self.ui.dark { "true" } else { "false" });
                         save("dark", "auto");
                     }
                 } else {
@@ -5147,6 +5154,14 @@ mod look_tests {
         let mut app = app_with(&[("theme", ""), ("dark", "auto")]);
         app.take_saved_look();
         assert!(app.ui.dark_follows_system, "the choice to follow is remembered, not read as a toggle");
+        app.ui.dark = true;
+        let log = saved_by(&mut app);
+        app.run("ui.themeFile", serde_json::json!({})).expect("follow the system");
+        assert!(log.lock().expect("the log").iter().any(|(key, value)| key == "dark_fallback" && value == "true"));
+        let mut restarted = app_with(&[("theme", ""), ("dark", "auto"), ("dark_fallback", "true")]);
+        restarted.take_saved_look();
+        assert!(restarted.ui.dark_follows_system);
+        assert!(restarted.ui.dark, "no reported system theme retains the saved fallback brightness");
         let mut app = app_with(&[("theme", ""), ("dark", "false")]);
         app.take_saved_look();
         assert!(!app.ui.dark_follows_system, "a saved brightness is a brightness, not a follow");

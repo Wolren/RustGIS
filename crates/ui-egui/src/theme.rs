@@ -776,6 +776,15 @@ fn held_note(name: &str, held: usize) -> String {
 
 /// Atomically saves a theme, preserving a symlink's target, permissions and the last replaced copy.
 fn save_theme_text(path: &std::path::Path, text: &str) -> Result<(), String> {
+    save_theme_text_with(path, text, write_theme_text)
+}
+
+/// Keeps recovery state only once the target may have changed; the writer is shared by all replacements.
+fn save_theme_text_with(
+    path: &std::path::Path,
+    text: &str,
+    mut write: impl FnMut(&std::path::Path, &str, Option<std::fs::Permissions>) -> std::io::Result<()>,
+) -> Result<(), String> {
     let target = match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).map_err(|e| why(path, &e.to_string()))?,
         Ok(_) => path.to_path_buf(),
@@ -816,13 +825,19 @@ fn save_theme_text(path: &std::path::Path, text: &str) -> Result<(), String> {
         }
     }
     let saved = (|| -> Result<(), String> {
-        write_theme_text(&target, text, permissions.clone()).map_err(|e| why(&target, &e.to_string()))?;
+        if let Err(error) = write(&target, text, permissions.clone()) {
+            // An atomic writer that failed left the target intact: this was not an interrupted replacement.
+            if old.is_some() {
+                std::fs::remove_file(&recovery).map_err(|e| why(&recovery, &e.to_string()))?;
+            }
+            return Err(why(&target, &error.to_string()));
+        }
         // The old backup is changed only after the new theme was saved successfully.
         if let Some(old) = &old {
             let kept = target.with_extension("json.bak");
-            if let Err(error) = write_theme_text(&kept, old, permissions.clone()) {
+            if let Err(error) = write(&kept, old, permissions.clone()) {
                 let reason = why(&kept, &error.to_string());
-                if let Err(restore) = write_theme_text(&target, old, permissions.clone()) {
+                if let Err(restore) = write(&target, old, permissions.clone()) {
                     return Err(i18n::fmt(
                         "{reason}; the previous theme is kept at {recovery}; restoration failed: {restore}",
                         &[("reason", &reason), ("recovery", &recovery.display().to_string()), ("restore", &restore.to_string())],
@@ -1463,6 +1478,20 @@ mod tests {
         assert!(save_theme_text(&path, "new").is_err());
         assert_eq!(std::fs::read_to_string(&path).expect("theme"), "old");
         assert!(backup.is_dir(), "the blocked destination is preserved");
+    }
+
+    /// An ordinary failed atomic write leaves the files intact and permits a subsequent save.
+    #[test]
+    fn a_failed_first_write_does_not_block_the_next_save() {
+        let dir = theme_folder(&[("mine.json", "old"), ("mine.json.bak", "older")]);
+        let path = dir.path().join("mine.json");
+        assert!(save_theme_text_with(&path, "new", |_, _, _| Err(std::io::Error::other("failed replacement"))).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("theme"), "old");
+        assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("backup"), "older");
+        assert!(!dir.path().join("mine.json.recover").exists());
+        save_theme_text(&path, "new").expect("retry succeeds");
+        assert_eq!(std::fs::read_to_string(&path).expect("theme"), "new");
+        assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("backup"), "old");
     }
 
     /// A recovery copy left by an interrupted save is never overwritten by the next save.
