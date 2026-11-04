@@ -245,7 +245,7 @@ struct MetricsFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     row_height: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    corner_radius: Option<u64>,
+    corner_radius: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     body: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,7 +264,7 @@ impl MetricsFile {
             item_spacing: Some(metrics.item_spacing),
             button_padding: Some(metrics.button_padding),
             row_height: Some(metrics.row_height),
-            corner_radius: Some(u64::from(metrics.corner_radius)),
+            corner_radius: Some(f64::from(metrics.corner_radius)),
             body: Some(metrics.body),
             button_text: Some(metrics.button_text),
             small: Some(metrics.small),
@@ -273,8 +273,9 @@ impl MetricsFile {
         }
     }
 
-    /// Applies the sizes the file sets; the rest keep what the theme it extends gave them.
-    fn apply_to(self, metrics: &mut Metrics) {
+    /// Applies sizes over the inherited metrics; returns the number of radii clamped or rounded.
+    fn apply_to(self, metrics: &mut Metrics) -> usize {
+        let mut held = 0;
         if let Some(v) = self.item_spacing {
             metrics.item_spacing = v;
         }
@@ -285,7 +286,8 @@ impl MetricsFile {
             metrics.row_height = v;
         }
         if let Some(v) = self.corner_radius {
-            metrics.corner_radius = u8::try_from(v).unwrap_or(u8::MAX);
+            metrics.corner_radius = v.clamp(0.0, 32.0).round() as u8;
+            held += usize::from(v != f64::from(metrics.corner_radius));
         }
         if let Some(v) = self.body {
             metrics.body = v;
@@ -302,6 +304,7 @@ impl MetricsFile {
         if let Some(v) = self.mono {
             metrics.mono = v;
         }
+        held
     }
 }
 
@@ -473,10 +476,9 @@ impl Theme {
         // apply() draws from this flag, so a base theme cannot decide the brightness.
         tokens.dark = dark;
         let mut metrics = fallback.metrics;
-        if let Some(file) = raw.metrics {
-            file.apply_to(&mut metrics);
-        }
+        let held_radius = raw.metrics.map_or(0, |file| file.apply_to(&mut metrics));
         let (metrics, held) = metrics.clamped();
+        let held = held + held_radius;
         if held > 0 {
             notes.push(held_note(&name, held));
         }
@@ -847,15 +849,23 @@ fn save_theme_text_with(
                 std::fs::remove_file(&recovery).map_err(|e| why(&recovery, &e.to_string()))?;
                 return Err(reason);
             }
-            sync_theme_folder(&target).map_err(|e| why(&recovery, &e.to_string()))?;
+            sync_theme_folder(&target).map_err(|e| incomplete_save(&target, &recovery, &e))?;
         }
         Ok(())
     })();
     saved?;
     if old.is_some() {
-        std::fs::remove_file(&recovery).map_err(|e| why(&recovery, &e.to_string()))?;
+        std::fs::remove_file(&recovery).map_err(|e| incomplete_save(&target, &recovery, &e))?;
     }
     Ok(())
+}
+
+/// Makes a partial save explicit: written files do not imply completed durability or recovery cleanup.
+fn incomplete_save(path: &std::path::Path, recovery: &std::path::Path, error: &std::io::Error) -> String {
+    i18n::fmt(
+        "{path}: the theme was written, but save completion failed: {reason}. A recovery copy may remain at {recovery}; compare the files before removing it and retrying.",
+        &[("path", &path.display().to_string()), ("reason", &error.to_string()), ("recovery", &recovery.display().to_string())],
+    )
 }
 
 /// Persists the recovery entry and completed renames on systems that support directory syncing.
@@ -1581,6 +1591,20 @@ mod tests {
         assert_eq!(theme.metrics.heading, 17.0, "what the file does not set stays standard");
         assert_eq!(theme.notes.len(), 1, "{:?}", theme.notes);
         assert!(theme.notes[0].contains("5 sizes"), "every held value is counted: {:?}", theme.notes);
+    }
+
+    /// Radius clamping and rounding are counted, while an exact supported radius stays quiet.
+    #[test]
+    fn negative_and_fractional_radii_are_reported() {
+        for (value, radius, held) in [(-1.0, 0, true), (5.5, 6, true), (5.0, 5, false)] {
+            let text = serde_json::json!({"schema":1,"extends":"Light","metrics":{"corner_radius":value}});
+            let theme = Theme::parse("Mine", &text.to_string()).expect("numeric radius");
+            assert_eq!(theme.metrics.corner_radius, radius);
+            assert_eq!(theme.notes.len(), usize::from(held));
+            if held {
+                assert!(theme.notes[0].contains("1 size"));
+            }
+        }
     }
 
     #[test]

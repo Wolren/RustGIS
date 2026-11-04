@@ -1827,9 +1827,11 @@ impl RustGisApp {
                 };
             }
         }
-        let scale = pref(self, "ui_scale").and_then(|v| v.parse::<f32>().ok());
+        let saved = pref(self, "ui_scale");
+        let scale = saved.as_deref().and_then(|v| v.parse::<f32>().ok());
         self.ui.interface_scale = scale.map_or(1.0, theme::clamp_scale);
-        if scale.is_some_and(|factor| factor != self.ui.interface_scale) {
+        if saved.is_some() && scale.is_none_or(|factor| factor != self.ui.interface_scale) {
+            i18n::set_current(self.chosen_lang());
             self.session.notify(
                 i18n::fmt("Interface scale held to {percent}%", &[("percent", &format!("{:.0}", self.ui.interface_scale * 100.0))]),
                 false,
@@ -5096,6 +5098,11 @@ mod look_tests {
         clean.take_saved_look();
         assert_eq!(clean.ui.interface_scale, 1.25);
         assert!(clean.session.notices.is_empty());
+        let mut malformed = app_with(&[("ui_scale", "1,25")]);
+        malformed.session.notices.clear();
+        malformed.take_saved_look();
+        assert_eq!(malformed.ui.interface_scale, 1.0);
+        assert_eq!(malformed.session.notices.iter().filter(|n| n.text == "Interface scale held to 100%").count(), 1);
     }
 
     #[test]
