@@ -13,7 +13,8 @@ drawn by the renderer, which takes its light or dark defaults from the theme's `
 
 The config folder is `%APPDATA%\RustGIS` on Windows, `~/Library/Application Support/RustGIS` on
 macOS and `$XDG_CONFIG_HOME/rustgis`, which is `~/.config/rustgis` when the variable is unset,
-elsewhere. `RUSTGIS_CONFIG_DIR` overrides it.
+elsewhere. The default Linux themes folder is `~/.config/rustgis/themes`.
+`RUSTGIS_CONFIG_DIR` overrides the config folder.
 
 A user file whose `name` matches a built-in replaces it. A reworked Light sits in the folder as
 `light.json`, and the menu lists one Light. Two files that claim the same name: the first in name
@@ -38,11 +39,12 @@ a file is a desktop route. The two built-in themes are the same files, compiled 
 differs.
 
 On the desktop, to start from a theme you already have, use **Load a Theme from File…**. The app
-keeps a copy in the themes folder; edit that copy and the app follows it. Loading a file whose `name`
+keeps the source text, including inherited settings and exact colour strings, in the themes folder
+(adding the resolved name if the file omitted it); edit that copy and the app follows it. Loading a file whose `name`
 matches a theme already in the folder replaces that copy, and the version it replaces is kept beside
 it as `<file>.json.bak`: one backup, replaced on each save. A file that does not load is listed in
-red at the bottom of the same menu with its reason. A bad colour, size or name is named by its
-token, and a notice says when a file was refused.
+red at the bottom of the same menu with its reason. Unknown tokens and bad colour strings name
+the token; values of the wrong JSON type give a line and column. A notice says when a file was refused.
 
 A saved file is picked up within a second, without pressing **Reload Themes**: the app watches the
 folder while it runs. A theme in use that stops loading leaves the window on the nearest built-in

@@ -73,6 +73,7 @@ mod scriptcolor;
 mod scriptcomplete;
 mod searchbox;
 mod serviceui;
+mod sessionlog;
 mod shortcutfile;
 mod shortcutui;
 mod showme;
@@ -700,6 +701,8 @@ pub struct UiState {
     pub embeddings: embeddingsui::State,
     /// Data Cubes: the filters, the period, and what the last action said.
     pub cubes: cubesui::State,
+    /// The History pane: the tools run or the session log, and the log's filters (#797).
+    pub session_log: sessionlog::State,
     /// NASA Earthaccess: the dataset, the granules found and the request under way.
     pub earthaccess: earthaccessui::State,
     /// Add From Service › Sign in to ArcGIS.
@@ -851,6 +854,7 @@ impl Default for UiState {
             opendata: Default::default(),
             embeddings: Default::default(),
             cubes: Default::default(),
+            session_log: Default::default(),
             earthaccess: Default::default(),
             arcgis: Default::default(),
             nldi: Default::default(),
@@ -1548,9 +1552,10 @@ impl RustGisApp {
         Ok(())
     }
 
-    /// Offers bytes as a download (web).
-    pub(crate) fn download_bytes(&mut self, name: &str, bytes: Vec<u8>) {
-        self.download(name, bytes);
+    /// Offers bytes as a download (web), and says whether it was delivered (a failure is
+    /// notified).
+    pub(crate) fn download_bytes(&mut self, name: &str, bytes: Vec<u8>) -> bool {
+        self.download(name, bytes)
     }
 
     /// Offers bytes as a download (web) and reports whether a download hook exists.
@@ -1634,6 +1639,7 @@ impl RustGisApp {
         }
     }
 
+    /// Reloads available theme files from the user folder, retaining built-ins when it is absent.
     fn load_themes(&mut self) {
         self.load_themes_from(theme::Theme::user_dir().as_deref());
     }
@@ -1671,10 +1677,16 @@ impl RustGisApp {
 
     /// A value the reader had to change is said once, in the words the theme file reader wrote.
     fn announce_theme_notes(&mut self, notes: &[String]) {
-        for note in notes {
-            if !self.theme_notes.contains(note) {
-                self.session.notify(note.clone(), false);
-            }
+        let new: Vec<&str> = notes.iter().filter(|note| !self.theme_notes.contains(note)).map(String::as_str).collect();
+        if !new.is_empty() {
+            let details = new.iter().take(8).copied().collect::<Vec<_>>().join("; ");
+            self.session.notify(
+                i18n::fmt(
+                    "{n} theme adjustment notice(s): {details}. Open Settings > Theme for all details.",
+                    &[("n", &new.len().to_string()), ("details", &details)],
+                ),
+                false,
+            );
         }
     }
 
@@ -1748,6 +1760,7 @@ impl RustGisApp {
         self.ui.interface_scale = scale.map_or(1.0, theme::clamp_scale);
     }
 
+    /// Selects a loaded theme and saves its name and brightness; unknown names leave the choice unchanged.
     fn use_theme(&mut self, name: &str) -> Result<(), String> {
         let Some(picked) = self.themes.iter().find(|t| t.name == name).cloned() else {
             return Err(i18n::fmt("No theme is named {name}.", &[("name", name)]));
@@ -1762,6 +1775,7 @@ impl RustGisApp {
         Ok(())
     }
 
+    /// Validates a bounded theme file, preserves its source in the user folder, then selects it.
     fn load_theme_file(&mut self, path: &std::path::Path) -> Result<(), String> {
         let said = |reason: &str| i18n::fmt("{path}: {reason}", &[("path", &path.display().to_string()), ("reason", reason)]);
         let text = match theme::read_text(path) {
@@ -1771,11 +1785,14 @@ impl RustGisApp {
         };
         let stem = path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
         let theme = theme::Theme::parse(&stem, &text).map_err(|e| said(&e))?;
-        // The picker says what the reader changed; the saved copy is clamped, so the folder is silent.
+        // Keep the original file text. Remember its notes before reloading so they are announced once.
+        self.announce_theme_notes(&theme.notes);
         for note in &theme.notes {
-            self.session.notify(note.clone(), false);
+            if !self.theme_notes.contains(note) {
+                self.theme_notes.push(note.clone());
+            }
         }
-        let kept = theme.save_user()?;
+        let kept = theme.save_user(&text)?;
         self.load_themes();
         self.use_theme(&theme.name)?;
         let kept = kept.display().to_string();
@@ -2478,6 +2495,12 @@ impl RustGisApp {
                     None => 1.0,
                 };
                 self.ui.interface_scale = theme::clamp_scale(factor);
+                if self.ui.interface_scale != factor {
+                    self.session.notify(
+                        i18n::fmt("Interface scale held to {percent}%", &[("percent", &format!("{:.0}", self.ui.interface_scale * 100.0))]),
+                        false,
+                    );
+                }
                 if let Some(save) = &self.services.save_pref {
                     save("ui_scale", &format!("{:.2}", self.ui.interface_scale));
                 }
@@ -4512,6 +4535,7 @@ mod record_tests {
             "layer.addUrl",
             "layer.addDownload",
             "layer.addDataBytes",
+            "layer.addDataText",
             "portal.add",
             "graphics.add",
             "layout.addElement",
@@ -5071,11 +5095,13 @@ mod look_tests {
         let dir = tempfile::tempdir().expect("a temporary folder");
         let text = r#"{"schema": 1, "name": "Mine", "extends": "Light", "metrics": {"body": 1e9}}"#;
         std::fs::write(dir.path().join("mine.json"), text).expect("the file");
+        std::fs::write(dir.path().join("other.json"), text.replace("Mine", "Other")).expect("another file");
         let mut app = app_with(&[]);
-        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("held to what the window draws")).count();
+        let said = |app: &RustGisApp| app.session.notices.iter().filter(|n| n.text.contains("theme adjustment notice")).count();
         let before = said(&app);
         app.load_themes_from(Some(dir.path()));
-        assert_eq!(said(&app) - before, 1, "the held size is said");
+        assert_eq!(said(&app) - before, 1, "the adjustments are reported together");
+        assert!(app.session.notices.iter().any(|n| n.text.starts_with("2 theme adjustment notice")));
         app.load_themes_from(Some(dir.path()));
         assert_eq!(said(&app) - before, 1, "and not again on the next watch tick");
     }

@@ -24,12 +24,22 @@ pub enum Over {
 /// Reads a theme file without trusting its length: a pipe or a device cannot exhaust memory.
 pub fn read_text(path: &std::path::Path) -> Result<String, Over> {
     use std::io::Read;
-    // Only a plain file is opened: opening a pipe blocks until a writer arrives.
-    let meta = std::fs::metadata(path).map_err(|e| Over::Reason(e.to_string()))?;
+    // Non-blocking open prevents a file replaced by a FIFO from hanging the UI thread.
+    #[cfg(unix)]
+    let file = std::fs::File::from(
+        rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| Over::Reason(e.to_string()))?,
+    );
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path).map_err(|e| Over::Reason(e.to_string()))?;
+    let meta = file.metadata().map_err(|e| Over::Reason(e.to_string()))?;
     if !meta.file_type().is_file() {
         return Err(Over::Reason(i18n::fmt("this is not a file", &[])));
     }
-    let file = std::fs::File::open(path).map_err(|e| Over::Reason(e.to_string()))?;
     let mut bytes = Vec::new();
     file.take(MAX_THEME_BYTES + 1).read_to_end(&mut bytes).map_err(|e| Over::Reason(e.to_string()))?;
     // Measured in bytes: a cut inside a character is a file too big, not a file badly encoded.
@@ -399,13 +409,19 @@ impl Theme {
             .collect()
     }
 
-    /// A refused file names the key at fault.
+    /// Reads the schema and named tokens, reporting semantic errors or the JSON parser location.
     pub fn parse(fallback_name: &str, text: &str) -> Result<Theme, String> {
         // Notepad saves UTF-8 with a byte-order mark, which serde refuses at the first byte.
         let text = text.trim_start_matches('\u{feff}');
         let raw: Raw = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let mut notes = Vec::new();
-        let name = clean_name(if raw.name.trim().is_empty() { fallback_name } else { raw.name.trim() }, &mut notes);
+        let mut name = clean_name(&raw.name, &mut notes);
+        if name.is_empty() {
+            name = clean_name(fallback_name, &mut notes);
+        }
+        if name.is_empty() {
+            name = "Theme".to_string();
+        }
         if raw.schema != SCHEMA {
             return Err(i18n::fmt(
                 "{name}: theme schema {found} is not {schema}",
@@ -467,6 +483,7 @@ impl Theme {
         Ok(Theme { name, dark, tokens, metrics, notes })
     }
 
+    /// Serializes resolved tokens and metrics without inheritance; importing a file preserves its original source instead.
     pub fn to_json(&self) -> Result<String, String> {
         let colours: BTreeMap<String, String> = TOKENS.iter().map(|name| ((*name).to_string(), hex(colour(self, name)))).collect();
         let raw = Raw {
@@ -601,14 +618,28 @@ impl Theme {
         Err(why(dir, &i18n::fmt("no free file name for {name}", &[("name", &self.name)])))
     }
 
-    /// The file name of a theme, with each non-alphanumeric character as `-`.
-    pub fn save_user(&self) -> Result<PathBuf, String> {
+    /// Preserves source tokens and inheritance, adding the resolved name when it came from the file stem.
+    fn source_text<'a>(&self, text: &'a str) -> Result<std::borrow::Cow<'a, str>, String> {
+        let mut value: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
+        let has_name = value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.chars().any(|c| !c.is_control() && !c.is_whitespace()));
+        if has_name {
+            return Ok(std::borrow::Cow::Borrowed(text));
+        }
+        let object = value.as_object_mut().ok_or_else(|| i18n::fmt("A theme file must be a JSON object.", &[]))?;
+        object.insert("name".to_string(), serde_json::Value::String(self.name.clone()));
+        serde_json::to_string_pretty(&value).map(std::borrow::Cow::Owned).map_err(|e| e.to_string())
+    }
+
+    /// Keeps the picked source text, preserving inherited settings and exact colour values.
+    pub fn save_user(&self, text: &str) -> Result<PathBuf, String> {
         let dir = Self::user_dir().ok_or_else(|| i18n::fmt("No settings folder to keep a theme in.", &[]))?;
         std::fs::create_dir_all(&dir).map_err(|e| why(&dir, &e.to_string()))?;
         let path = self.save_path(&dir)?;
-        let text = self.to_json()?;
-        backup_before_replace(&path, &text)?;
-        rustgis_engine::data::io::write_atomic(&path, text.as_bytes()).map_err(|e| why(&path, &e.to_string()))?;
+        let source = self.source_text(text)?;
+        save_theme_text(&path, &source)?;
         Ok(path)
     }
 }
@@ -692,9 +723,6 @@ fn clean_name(name: &str, notes: &mut Vec<String>) -> String {
     let controls = trimmed.chars().count() - printable;
     let kept: String = trimmed.chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
     let kept = kept.trim();
-    if kept.is_empty() {
-        return "Theme".to_string();
-    }
     if controls > 0 {
         notes.push(if controls == 1 {
             i18n::fmt("{name}: 1 control character was dropped from the name", &[("name", kept)])
@@ -738,15 +766,44 @@ fn held_note(name: &str, held: usize) -> String {
     }
 }
 
-/// The file it replaces is kept as `<file>.json.bak`: one backup, replaced on each save.
-fn backup_before_replace(path: &std::path::Path, text: &str) -> Result<(), String> {
-    // The same bound as any other read: a file over the limit is left alone, not loaded whole.
-    let Ok(old) = read_text(path) else { return Ok(()) };
-    if old == text {
+/// Atomically saves a theme, preserving a symlink's target, permissions and the last replaced copy.
+fn save_theme_text(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).map_err(|e| why(path, &e.to_string()))?,
+        Ok(_) => path.to_path_buf(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) => return Err(why(path, &e.to_string())),
+    };
+    let old = if target.exists() {
+        Some(read_text(&target).map_err(|e| match e {
+            Over::TooBig => too_big(&target),
+            Over::Reason(reason) => why(&target, &reason),
+        })?)
+    } else {
+        None
+    };
+    if old.as_deref() == Some(text) {
         return Ok(());
     }
-    let kept = path.with_extension("json.bak");
-    std::fs::write(&kept, old).map_err(|e| why(&kept, &e.to_string()))
+    let permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    write_theme_text(&target, text, permissions.clone()).map_err(|e| why(&target, &e.to_string()))?;
+    // The old backup is changed only after the new theme was saved successfully.
+    if let Some(old) = old {
+        let kept = target.with_extension("json.bak");
+        write_theme_text(&kept, &old, permissions).map_err(|e| why(&kept, &e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Sets the temporary file's permissions before writing any theme content into it.
+fn write_theme_text(path: &std::path::Path, text: &str, permissions: Option<std::fs::Permissions>) -> std::io::Result<()> {
+    use std::io::Write;
+    rustgis_engine::data::io::write_atomic_with(path, |out| {
+        if let Some(permissions) = permissions {
+            out.get_ref().set_permissions(permissions)?;
+        }
+        out.write_all(text.as_bytes())
+    })
 }
 
 /// A value as a message shows it: long enough to recognise, short enough to stay one line.
@@ -762,7 +819,18 @@ fn clip(text: &str) -> String {
 fn stem_of(name: &str) -> String {
     let dashed: String = name.chars().map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
     let stem = dashed.trim_matches('-').to_string();
-    if stem.is_empty() { "theme".to_string() } else { stem }
+    let reserved = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || stem
+            .strip_prefix("com")
+            .or_else(|| stem.strip_prefix("lpt"))
+            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    if stem.is_empty() {
+        "theme".to_string()
+    } else if reserved {
+        format!("theme-{stem}")
+    } else {
+        stem
+    }
 }
 
 /// A non-ASCII colour is refused before the byte cut, which would land inside a character.
@@ -1237,9 +1305,9 @@ mod tests {
         let picked = json.to_string();
         let dir = theme_folder(&[("mine.json", &edited)]);
         let path = dir.path().join("mine.json");
-        backup_before_replace(&path, &picked).expect("the backup");
+        save_theme_text(&path, &picked).expect("the backup");
         assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("the backup file"), edited);
-        assert_eq!(std::fs::read_to_string(&path).expect("the file"), edited, "the file is not touched yet");
+        assert_eq!(std::fs::read_to_string(&path).expect("the file"), picked, "the new theme was saved");
         // The folder loads one Mine, and the backup is not a theme.
         std::fs::write(&path, &picked).expect("the file");
         let (found, errors) = Theme::available_in(Some(dir.path()));
@@ -1247,8 +1315,76 @@ mod tests {
         assert_eq!(found.iter().filter(|t| t.name == "Mine").count(), 1, "one Mine is offered");
         assert!(!found.iter().any(|t| t.name.contains("bak")), "the backup is not a theme");
         // Writing the same text again leaves the backup alone.
-        backup_before_replace(&path, &picked).expect("no backup needed");
+        save_theme_text(&path, &picked).expect("no backup needed");
         assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("the backup file"), edited);
+    }
+
+    /// Missing names use the source stem and remain stable when the kept copy has another file name.
+    #[test]
+    fn a_missing_theme_name_keeps_its_fallback_when_saved() {
+        let source = r##"{"schema":1,"extends":"Dark","colours":{"accent":"#2563EB80"}}"##;
+        let theme = Theme::parse("My Theme", source).expect("the file stem supplies the name");
+        assert_eq!(theme.name, "My Theme");
+        let kept = theme.source_text(source).expect("the kept source");
+        let raw: serde_json::Value = serde_json::from_str(&kept).expect("json");
+        assert_eq!(raw["extends"], "Dark");
+        assert_eq!(raw["colours"]["accent"], "#2563EB80");
+        assert_eq!(Theme::parse("my-theme", &kept).expect("reload").name, "My Theme");
+        assert!(theme.source_text("[]").is_err(), "a malformed source must not panic while inserting its name");
+    }
+
+    /// A picked named file keeps its exact source, rather than quantizing alpha colours on export.
+    #[test]
+    fn a_named_theme_preserves_its_source_text() {
+        let source = r##"{"schema":1,"name":"Mine","extends":"Dark","colours":{"accent":"#2563EB80"}}"##;
+        let theme = Theme::parse("mine", source).expect("theme");
+        assert_eq!(theme.source_text(source).expect("source"), source);
+        for name in ["CON", "NUL", "PRN", "AUX", "COM1", "LPT9"] {
+            assert!(stem_of(name).starts_with("theme-"), "{name}");
+        }
+    }
+
+    /// Saving through a symlink updates its target and preserves restricted permissions.
+    #[cfg(unix)]
+    #[test]
+    fn a_theme_save_preserves_links_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = theme_folder(&[("real.json", "old")]);
+        let target = dir.path().join("real.json");
+        let link = dir.path().join("mine.json");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("permissions");
+        save_theme_text(&link, "new").expect("save");
+        assert!(std::fs::symlink_metadata(&link).expect("metadata").file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).expect("target"), "new");
+        assert_eq!(std::fs::metadata(&target).expect("metadata").permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(dir.path().join("real.json.bak")).expect("backup"), "old");
+    }
+
+    /// Linux's FIFO test exercises the non-blocking open used before inspecting the file handle.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_theme_fifo_is_refused_without_blocking() {
+        let dir = theme_folder(&[]);
+        let fifo = dir.path().join("pipe.json");
+        rustix::fs::mknodat(rustix::fs::CWD, &fifo, rustix::fs::FileType::Fifo, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR, 0)
+            .expect("fifo");
+        assert!(read_text(&fifo).is_err());
+    }
+
+    /// A failed atomic replacement leaves both the theme and its previous backup unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_theme_save_keeps_the_previous_backup() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = theme_folder(&[("mine.json", "old"), ("mine.json.bak", "older")]);
+        let path = dir.path().join("mine.json");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).expect("read-only folder");
+        let result = save_theme_text(&path, "new");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("restore folder");
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("theme"), "old");
+        assert_eq!(std::fs::read_to_string(dir.path().join("mine.json.bak")).expect("backup"), "older");
     }
 
     #[test]

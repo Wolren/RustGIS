@@ -4550,7 +4550,7 @@ fn legend_list(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, t: &Tokens) {
         |ui| {
             ui.set_width(ui.available_width());
             let legend = l.renderer.legend();
-            // Unique Values legends sort their classes by label: row i shows class `order[i]`,
+            // Unique Values legends sort their classes (by value or by label): row i shows class `order[i]`,
             // and the rows past them (`<all other values>`) keep their place.
             let order = l.renderer.class_order();
             // At most MAX_UNIQUE classes (a style import can bring more), then Unique Values'
@@ -5716,7 +5716,10 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
 // ---------------------------------------------------------------------------------------------
 // History and Details
 
-fn history(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+pub(crate) fn history(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
+    if crate::sessionlog::tabs(app, ui) {
+        return crate::sessionlog::pane(app, ui, t);
+    }
     let hist = app.session.project.gp_history.clone();
     if hist.is_empty() {
         ui.label(egui::RichText::new(tl!("Tools you run appear here.")).color(t.text_dim));

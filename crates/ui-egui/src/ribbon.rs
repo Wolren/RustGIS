@@ -3500,6 +3500,7 @@ fn autosave_menu(app: &mut RustGisApp, ui: &mut Ui) {
     });
 }
 
+/// Shows the actual drawn theme, including built-in fallback, and file-loading diagnostics.
 fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     // The browser reports prefers-color-scheme; winit reports nothing on Linux.
     let system = ui.ctx().system_theme().is_some();
@@ -3508,6 +3509,7 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
     let themes: Vec<String> = app.themes.iter().map(|t| t.name.clone()).collect();
     // The drawn theme is marked: a saved name whose file stopped loading is not drawn.
     let drawn = app.drawn().map(|t| t.name.clone());
+    let fallback = drawn.is_none().then(|| app.current_theme().name);
     let errors = app.theme_errors.clone();
     let notes = app.theme_notes.clone();
     // The browser has no settings folder to read theme files from or write one to.
@@ -3526,6 +3528,10 @@ fn theme_menu(app: &mut RustGisApp, ui: &mut Ui) {
             if follow.clicked() {
                 run_notified(app, "ui.themeFile", Value::Null);
                 ui.close();
+            }
+            if let Some(name) = &fallback {
+                let label = crate::i18n::fmt("{name} (built-in fallback)", &[("name", &crate::theme::label(name))]);
+                ui.add_enabled(false, egui::Button::selectable(!follows, label));
             }
             for name in &themes {
                 let picked = !follows && drawn.as_deref() == Some(name.as_str());
