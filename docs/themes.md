@@ -48,7 +48,9 @@ compare it with the theme and backup, then remove the recovery file before savin
 red at the bottom of the same menu with its reason. Unknown tokens and bad colour strings name
 the token; values of the wrong JSON type give a line and column. A notice says when a file was refused.
 
-The app checks file names, sizes and modification times once a second while it runs. A save
+While the themes folder is readable, the app checks file names, sizes and modification times
+once a second. Without that folder, the app does not wake just to check for themes. If you create
+the folder while the app is idle, interact with the app or use **Reload Themes** to discover it. A save
 that changes that metadata is picked up automatically. If a save preserves both size and
 modification time, use **Reload Themes** to reread it. A theme in use that stops loading leaves the window on the nearest built-in
 until it loads again: the button names the theme drawn, the menu gives the reason, and the choice
